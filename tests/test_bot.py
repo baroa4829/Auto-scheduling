@@ -388,3 +388,13 @@ def test_run_stock_end_to_end(monkeypatch, tmp_path):
 def test_pick_task_stock():
     assert main.pick_task(datetime(2026, 11, 12, 8, 25, tzinfo=main.KST)) == ("stock", "morning")
     assert main.pick_task(datetime(2026, 11, 12, 16, 20, tzinfo=main.KST)) == ("stock", "close")
+
+
+def test_default_watchlist_and_long_telegram_split():
+    items = stocks.parse_watchlist()
+    assert len(items) == 22 and all(i.symbol and i.name for i in items)
+    assert ("TIGER 미국S&P500", "360750.KS") in [(i.name, i.symbol) for i in items]
+    qs = [stocks.analyze(i, _chart([100.0 + k for k in range(30)])) for i in items]
+    msgs = stocks.render_telegram("close", date(2026, 11, 12), {"⭐ 관심 종목": qs * 2}, {"headline": "h", "points": ["p"], "watch": ["w"]})
+    assert len(msgs) >= 2 and all(len(m) <= 4000 for m in msgs)
+    assert sum(m.count("삼성전자") for m in msgs) == 2  # 잘려 나간 종목 없음

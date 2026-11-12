@@ -34,8 +34,16 @@ WEEKDAYS = "월화수목금토일"
 # 관심 종목 기본값. GitHub 저장소 Variables 의 STOCK_WATCHLIST 로 바꿀 수 있다.
 # 형식: "이름:야후심볼,..."  (국내 코스피 종목은 6자리코드.KS, 코스닥은 .KQ)
 DEFAULT_WATCHLIST = (
+    # 국내 대형주
     "삼성전자:005930.KS,SK하이닉스:000660.KS,현대차:005380.KS,"
-    "엔비디아:NVDA,애플:AAPL,테슬라:TSLA"
+    # 국내 상장 ETF (.KS)
+    "TIGER 미국우주테크:0183J0.KS,KODEX 은선물(H):144600.KS,"
+    "TIGER 미국배당다우존스타겟커버드콜2호:458760.KS,TIGER 미국S&P500:360750.KS,"
+    # 미국 종목
+    "스페이스X:SPCX,엔비디아:NVDA,블룸 에너지:BE,힘스 앤 허스 헬스:HIMS,"
+    "파가야 테크놀로지스:PGY,플러그 파워:PLUG,아처 에비에이션:ACHR,C3 AI:AI,"
+    "조비 에비에이션:JOBY,제타 글로벌 홀딩스:ZETA,로켓 랩:RKLB,유아이패스:PATH,"
+    "팔란티어:PLTR,아이온큐:IONQ,테슬라:TSLA"
 )
 
 
@@ -353,8 +361,16 @@ def render_telegram(edition: str, day: date, quotes: dict[str, list[Quote]],
     full = "\n".join(head + body + tail)
     if len(full) <= 4000:
         return [full]
-    # 길면 시세 / 코멘트로 나눠 보낸다
-    return ["\n".join(head + body)[:4000], "\n".join(tail).strip()[:4000]]
+    # 길면 줄 단위로 나눠 4000자 이내 여러 메시지로 보낸다 (종목이 잘리지 않게)
+    msgs, buf = [], []
+    for line in head + body + tail:
+        if buf and len("\n".join(buf + [line])) > 3900:
+            msgs.append("\n".join(buf))
+            buf = []
+        buf.append(line)
+    if buf:
+        msgs.append("\n".join(buf))
+    return msgs
 
 
 # ---------------- Claude 코멘트 ----------------
