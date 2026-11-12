@@ -3,7 +3,7 @@
 ## 📰 데일리 브리핑 봇 (날씨 + 네이트 뉴스 Top10)
 
 매일 정해진 시간에 날씨와 [네이트 뉴스](https://news.nate.com/rank/interest) 분야별 **많이 본 뉴스 Top10** 요약을
-텔레그램 / 슬랙 / 디스코드로 보내 줍니다. GitHub Actions가 자동으로 실행합니다.
+텔레그램으로 보내 줍니다. GitHub Actions가 자동으로 실행합니다.
 
 ### 하루 일정 (KST)
 
@@ -26,7 +26,7 @@
 2. **요약** (`briefing_bot/summarizer.py`): 분야마다 Claude API를 한 번 호출해 분야 헤드라인 1줄과 기사별 요약을 받습니다.
    22시 브리핑은 분야를 아우르는 하루 정리를 만들기 위해 한 번 더 호출합니다.
 3. **날씨** (`briefing_bot/weather.py`): [Open-Meteo](https://open-meteo.com) 예보와 대기질 API를 씁니다. API 키는 필요 없습니다.
-4. **전송** (`briefing_bot/notifier.py`): 텔레그램, 슬랙, 디스코드 중 설정된 채널로 보냅니다.
+4. **전송** (`briefing_bot/notifier.py`): 텔레그램으로 보냅니다.
    뉴스 브리핑은 `briefings/YYYY-MM-DD/<순서>-<에디션>.md`로 커밋되어 아카이브로 남습니다.
 
 뉴스 분야 코드는 다음과 같습니다.
@@ -41,22 +41,72 @@
 | `ent` | 연예 |
 | `spo` | 스포츠 |
 
-### 설정 방법 (GitHub Actions)
+### 설정 방법 (처음 한 번만, 약 10분)
 
-**Settings → Secrets and variables → Actions**에서 설정합니다.
+준비물은 휴대폰 텔레그램 앱, GitHub 계정, Claude API 키 세 가지입니다.
+값은 모두 **GitHub 저장소 설정**에 넣습니다. 텔레그램에는 봇만 만들고, 거기서 받은 값을 GitHub에 옮겨 적는 구조입니다.
 
-| 종류 | 이름 | 필수 여부 | 설명 |
-|------|------|------|------|
-| Secret | `ANTHROPIC_API_KEY` | 필수 | Claude API 키 (뉴스 요약에 사용) |
-| Secret | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | 선택 | 텔레그램 전송 (@BotFather로 봇 생성) |
-| Secret | `SLACK_WEBHOOK_URL` | 선택 | 슬랙 Incoming Webhook |
-| Secret | `DISCORD_WEBHOOK_URL` | 선택 | 디스코드 Webhook |
-| Variable | `WEATHER_LOCATIONS` | 선택 | 날씨 지역 `이름:위도:경도`, 쉼표로 여러 개. 기본값은 `서울:37.5665:126.9780` |
-| Variable | `NATE_SECTIONS` | 선택 | 뉴스 분야 (예: `pol,eco,its`). 기본값은 전체 7개 분야 |
+#### 1단계 — 텔레그램 봇 만들기 → `토큰` 받기
 
-- 예약 실행은 **기본 브랜치**에 있는 워크플로만 동작합니다.
-- **Actions → Daily Briefing → Run workflow**에서 작업을 골라 수동으로 실행할 수 있습니다.
-- 시각을 바꾸려면 `.github/workflows/daily-briefing.yml`의 `cron`(UTC 기준)과 바로 아래 `case` 매핑을 함께 수정하세요.
+1. 텔레그램에서 **@BotFather**를 검색해 대화를 시작합니다 (파란 체크 표시가 있는 공식 계정).
+2. `/newbot`을 보냅니다.
+3. 봇 이름을 입력합니다 (예: `내 뉴스 브리핑`).
+4. 봇 아이디를 입력합니다. 반드시 `bot`으로 끝나야 합니다 (예: `my_daily_brief_bot`).
+5. BotFather가 `123456789:AAH...` 같은 긴 문자열을 줍니다. 이것이 **봇 토큰**이니 복사해 두세요.
+   토큰은 비밀번호와 같으니 다른 사람에게 보여 주지 마세요.
+
+#### 2단계 — 내 `채팅 ID` 알아내기
+
+1. 방금 만든 봇을 텔레그램에서 검색해 열고 **시작(Start)**을 누른 뒤 아무 메시지(예: `안녕`)나 보냅니다.
+   이 단계를 건너뛰면 봇이 나에게 메시지를 보낼 수 없습니다.
+2. PC나 휴대폰 브라우저 주소창에 아래 주소를 입력합니다. `<토큰>` 자리에는 1단계의 토큰을 넣습니다.
+   ```
+   https://api.telegram.org/bot<토큰>/getUpdates
+   ```
+3. 화면에 나온 글자 중 `"chat":{"id":123456789` 부분의 숫자가 **채팅 ID**입니다. 복사해 두세요.
+   결과가 `"result":[]`처럼 비어 있으면 봇에게 메시지를 한 번 더 보내고 새로고침하세요.
+
+#### 3단계 — Claude API 키 만들기
+
+1. https://console.anthropic.com 에 로그인합니다.
+2. **API Keys → Create Key**로 키를 만들고 복사합니다 (`sk-ant-...`로 시작).
+3. **Billing**에서 결제 수단을 등록하거나 크레딧을 충전합니다.
+
+#### 4단계 — GitHub에 값 3개 등록 (Secret)
+
+1. GitHub에서 이 저장소 페이지를 열고 **Settings** 탭을 누릅니다.
+2. 왼쪽 메뉴에서 **Secrets and variables → Actions**를 엽니다.
+3. **New repository secret**을 눌러 아래 3개를 하나씩 등록합니다. 이름은 철자까지 똑같이 입력해야 합니다.
+
+| Name | Secret (값) |
+|------|------|
+| `TELEGRAM_BOT_TOKEN` | 1단계의 봇 토큰 |
+| `TELEGRAM_CHAT_ID` | 2단계의 채팅 ID 숫자 |
+| `ANTHROPIC_API_KEY` | 3단계의 Claude API 키 |
+
+#### 5단계 — 기본 브랜치에 합치기
+
+예약 실행은 저장소의 **기본 브랜치(main)**에 있는 설정만 동작합니다. 이 작업 브랜치를 main에 병합(merge)하세요.
+
+#### 6단계 — 테스트 실행
+
+1. 저장소의 **Actions** 탭 → 왼쪽 **Daily Briefing** → 오른쪽 **Run workflow**를 누릅니다.
+2. task에서 `weather`를 고르고 실행하면 1~2분 안에 텔레그램으로 날씨가 옵니다.
+3. 같은 방법으로 `morning`을 실행해 뉴스 브리핑이 오는지 확인합니다.
+4. 실행에 실패하면(빨간 X) 해당 실행을 눌러 로그를 확인하세요. 대부분 Secret 이름 오타이거나, 봇에게 먼저 메시지를 보내지 않은 경우입니다.
+
+여기까지 하면 매일 07·08·12·16·22시에 자동으로 메시지가 옵니다.
+
+#### (선택) 바꾸고 싶을 때
+
+같은 화면의 **Variables** 탭에서 등록합니다.
+
+| Name | 예시 | 설명 |
+|------|------|------|
+| `WEATHER_LOCATIONS` | `화성 동탄9동:37.1830:127.1130` | 날씨 지역 `이름:위도:경도`. 쉼표로 여러 곳을 넣을 수 있습니다. 기본값은 동탄9동입니다 |
+| `NATE_SECTIONS` | `pol,eco,its` | 받을 뉴스 분야. 기본값은 7개 분야 전체입니다 |
+
+시각을 바꾸려면 `.github/workflows/daily-briefing.yml`의 `cron`(UTC 기준)과 그 아래 `case` 매핑을 함께 수정하세요.
 
 ### 로컬 실행
 

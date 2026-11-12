@@ -1,11 +1,10 @@
-"""브리핑을 마크다운/텔레그램 형식으로 만들고 텔레그램·슬랙·디스코드로 전송한다."""
+"""브리핑을 마크다운/텔레그램 형식으로 만들고 텔레그램으로 전송한다."""
 
 from __future__ import annotations
 
 import html
 import logging
 import os
-import re
 from datetime import date
 
 import requests
@@ -120,46 +119,11 @@ def send_telegram(token: str, chat_id: str, messages: list[str]) -> bool:
     return ok
 
 
-def _chunks(text: str, limit: int) -> list[str]:
-    """'## ' 섹션 단위로 limit 이하 조각으로 나눈다."""
-    out, cur = [], ""
-    for i, block in enumerate(text.split("\n## ")):
-        piece = block if i == 0 else "## " + block
-        if cur and len(cur) + len(piece) + 1 > limit:
-            out.append(cur)
-            cur = ""
-        cur += ("\n" if cur else "") + piece
-    if cur:
-        out.append(cur)
-    return [c[:limit] for c in out]
-
-
-def to_slack_mrkdwn(markdown: str) -> str:
-    text = re.sub(r"\*\*\[(.+?)\]\((.+?)\)\*\*", r"*<\2|\1>*", markdown)
-    text = re.sub(r"\[(.+?)\]\((.+?)\)", r"<\2|\1>", text)
-    return re.sub(r"^#+ (.*)$", r"*\1*", text, flags=re.M)
-
-
-def send_webhook(webhook: str, key: str, chunks: list[str], name: str) -> bool:
-    ok = True
-    for chunk in chunks:
-        resp = requests.post(webhook, json={key: chunk}, timeout=15)
-        if not resp.ok:
-            ok = False
-            log.error("%s 전송 실패: %s %s", name, resp.status_code, resp.text[:200])
-    return ok
-
-
 def dispatch(markdown: str, telegram_messages: list[str]) -> list[str]:
-    """환경변수로 설정된 채널로 전송하고, 전송한 채널 이름 목록을 반환."""
-    sent = []
-    tg_token, tg_chat = os.environ.get("TELEGRAM_BOT_TOKEN"), os.environ.get("TELEGRAM_CHAT_ID")
-    if tg_token and tg_chat and send_telegram(tg_token, tg_chat, telegram_messages):
-        sent.append("telegram")
-    if hook := os.environ.get("SLACK_WEBHOOK_URL"):
-        if send_webhook(hook, "text", _chunks(to_slack_mrkdwn(markdown), 3500), "슬랙"):
-            sent.append("slack")
-    if hook := os.environ.get("DISCORD_WEBHOOK_URL"):
-        if send_webhook(hook, "content", _chunks(markdown, 1900), "디스코드"):
-            sent.append("discord")
-    return sent
+    """텔레그램으로 전송한다. 설정이 없거나 전송에 실패하면 예외를 던져 실행을 실패 처리한다."""
+    token, chat_id = os.environ.get("TELEGRAM_BOT_TOKEN"), os.environ.get("TELEGRAM_CHAT_ID")
+    if not (token and chat_id):
+        raise RuntimeError("TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID 가 설정되지 않았습니다")
+    if not send_telegram(token, chat_id, telegram_messages):
+        raise RuntimeError("텔레그램 전송에 실패했습니다 (토큰/채팅 ID 를 확인하세요)")
+    return ["telegram"]

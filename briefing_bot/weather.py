@@ -47,7 +47,8 @@ WMO: dict[int, tuple[str, str]] = {
     99: ("⛈️", "강한 우박 뇌우"),
 }
 
-DEFAULT_LOCATIONS = "서울:37.5665:126.9780"
+# 기본 지역: 경기 화성시 동탄9동 (신동 일대)
+DEFAULT_LOCATIONS = "화성 동탄9동:37.1830:127.1130"
 
 
 @dataclass

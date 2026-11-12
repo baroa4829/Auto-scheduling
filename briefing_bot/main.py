@@ -76,7 +76,7 @@ def _send(markdown: str, telegram: list[str], no_send: bool) -> None:
         print(markdown)
         return
     sent = notifier.dispatch(markdown, telegram)
-    logging.info("전송 채널: %s", sent or "없음 (환경변수 미설정 또는 전송 실패)")
+    logging.info("전송 완료: %s", sent)
 
 
 # ---------------- 날씨 ----------------
