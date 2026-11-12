@@ -14,7 +14,7 @@ on:
       task:
         description: "실행할 작업"
         type: choice
-        options: [weather, morning, noon, afternoon, evening]
+        options: [weather, morning, noon, afternoon, evening, telegram-check]
         default: morning
       sections:
         description: "뉴스 분야 코드 (pol,eco,soc,int,its,ent,spo), 비우면 기본값"
@@ -67,14 +67,14 @@ jobs:
           NATE_SECTIONS: ${{ inputs.sections || vars.NATE_SECTIONS }}
           WEATHER_LOCATIONS: ${{ vars.WEATHER_LOCATIONS }}
         run: |
-          if [ "$TASK" = "weather" ]; then
-            python -m briefing_bot.main weather
+          if [ "$TASK" = "weather" ] || [ "$TASK" = "telegram-check" ]; then
+            python -m briefing_bot.main "$TASK"
           else
             python -m briefing_bot.main news --edition "$TASK"
           fi
 
       - name: Commit briefing archive
-        if: steps.pick.outputs.task != 'weather'
+        if: steps.pick.outputs.task != 'weather' && steps.pick.outputs.task != 'telegram-check'
         env:
           TASK: ${{ steps.pick.outputs.task }}
         run: |

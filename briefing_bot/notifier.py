@@ -121,9 +121,61 @@ def send_telegram(token: str, chat_id: str, messages: list[str]) -> bool:
 
 def dispatch(markdown: str, telegram_messages: list[str]) -> list[str]:
     """텔레그램으로 전송한다. 설정이 없거나 전송에 실패하면 예외를 던져 실행을 실패 처리한다."""
-    token, chat_id = os.environ.get("TELEGRAM_BOT_TOKEN"), os.environ.get("TELEGRAM_CHAT_ID")
+    token = (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
+    chat_id = (os.environ.get("TELEGRAM_CHAT_ID") or "").strip()
     if not (token and chat_id):
         raise RuntimeError("TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID 가 설정되지 않았습니다")
     if not send_telegram(token, chat_id, telegram_messages):
         raise RuntimeError("텔레그램 전송에 실패했습니다 (토큰/채팅 ID 를 확인하세요)")
     return ["telegram"]
+
+
+# ---------- 텔레그램 설정 진단 ----------
+
+def telegram_check(token: str, chat_id: str) -> int:
+    """토큰이 어떤 봇인지, 그 봇에게 메시지를 보낸 채팅 ID 가 무엇인지 확인한다.
+
+    값 자체는 로그에 남기지 않고, 설정된 채팅 ID 와 일치하는지만 알려준다.
+    """
+    base = f"https://api.telegram.org/bot{token}"
+    me = requests.get(f"{base}/getMe", timeout=15).json()
+    if not me.get("ok"):
+        log.error("❌ 봇 토큰이 올바르지 않습니다: %s", me.get("description"))
+        return 1
+    bot = me["result"]
+    log.info("✅ 토큰 정상 — 이 토큰의 봇: %s (@%s)", bot.get("first_name"), bot.get("username"))
+
+    upd = requests.get(f"{base}/getUpdates", timeout=15).json()
+    if not upd.get("ok"):
+        log.error("getUpdates 실패: %s", upd.get("description"))
+        return 1
+
+    chats: dict[str, str] = {}
+    for u in upd.get("result", []):
+        msg = u.get("message") or u.get("edited_message") or u.get("my_chat_member") or {}
+        chat = msg.get("chat") or {}
+        if "id" in chat:
+            chats[str(chat["id"])] = chat.get("first_name") or chat.get("title") or ""
+
+    configured = (chat_id or "").strip()
+    if not chats:
+        log.error(
+            "❌ @%s 봇이 최근 받은 메시지가 없습니다. 텔레그램에서 @%s 를 열고 "
+            "'안녕' 같은 메시지를 보낸 뒤 다시 실행하세요.",
+            bot.get("username"), bot.get("username"),
+        )
+        return 1
+
+    log.info("@%s 에게 메시지를 보낸 사람: %s", bot.get("username"),
+             ", ".join(f"{name or '이름없음'}" for name in chats.values()))
+    if configured in chats:
+        log.info("✅ TELEGRAM_CHAT_ID 가 %s 님의 채팅 ID 와 일치합니다.", chats[configured])
+        ok = send_telegram(token, configured, ["✅ 텔레그램 연결 테스트 성공! 브리핑이 이 채팅으로 옵니다."])
+        return 0 if ok else 1
+
+    for cid, name in chats.items():
+        # 채팅 ID 는 비밀값이 아니므로 그대로 보여줘 Secret 에 넣을 수 있게 한다
+        log.error("❌ TELEGRAM_CHAT_ID 가 일치하지 않습니다. %s 님의 올바른 채팅 ID: %s", name or "이름없음", cid)
+    if configured != chat_id:
+        log.error("(참고: 설정된 값 앞뒤에 공백이 있습니다)")
+    return 1
