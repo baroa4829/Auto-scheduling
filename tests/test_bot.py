@@ -49,6 +49,23 @@ class FakeResp:
         pass
 
 
+def test_ranking_split_blocks(monkeypatch):
+    """1~5위와 6~10위가 다른 블록에 있어도 10개를 모은다."""
+    html_ = _rank_html().decode("cp949").replace(
+        '<ul class="mduSubject">', '</div><div class="otherBlock"><ul class="mduSubject">'
+    ).replace("</ul></div>", "</ul></div>").encode("cp949")
+    monkeypatch.setattr(requests.Session, "get", lambda self, url, **kw: FakeResp(html_))
+    arts = scraper.fetch_ranking(requests.Session(), "pol", date(2026, 11, 11), 10)
+    assert [a.title for a in arts][-1] == "기사 제목 번호 10" and len(arts) == 10
+
+
+def test_missing_secrets(monkeypatch, caplog):
+    for k in ("ANTHROPIC_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"):
+        monkeypatch.delenv(k, raising=False)
+    assert main.main(["news"]) == 1
+    assert "ANTHROPIC_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID" in caplog.text
+
+
 def test_scrape_rank_and_body(monkeypatch):
     def fake_get(self, url, **kw):
         return FakeResp(_rank_html() if "/rank/" in url else _view_html())
@@ -146,6 +163,8 @@ def test_pick_task():
 def test_news_editions_mark_new_and_fallback(monkeypatch, tmp_path):
     today = date(2026, 11, 12)
     monkeypatch.setattr(main, "now_kst", lambda: datetime(2026, 11, 12, 8, 0, tzinfo=main.KST))
+    for k in ("ANTHROPIC_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"):
+        monkeypatch.setenv(k, "x")
 
     calls = []
     state = {"titles": ["A", "B", "C", "D", "E", "F"]}
@@ -171,9 +190,10 @@ def test_news_editions_mark_new_and_fallback(monkeypatch, tmp_path):
     assert calls == [today, date(2026, 11, 11)]
     assert "어제(11/11) 랭킹을 사용" in sent[-1] and "🆕" not in sent[-1]
 
-    # 12시: 오늘 랭킹 정상, 1차와 다른 기사는 모두 🆕
+    # 12시: 오늘 랭킹 정상(어제보다 많음), 1차와 다른 기사는 모두 🆕
     state["thin"] = False
-    state["titles"] = ["Y1", "A", "B", "C", "D", "E"]
+    state["titles"] = ["Y1", "A", "B", "C", "D", "E", "F"]
+    calls.clear()
     assert main.main(["news", "--edition", "noon", "--sections", "pol", "--out-dir", str(tmp_path)]) == 0
     md = sent[-1]
     assert "☀️ 2차 뉴스 브리핑" in md

@@ -54,7 +54,6 @@ EDITIONS: dict[str, Edition] = {
 }
 
 WEATHER_HOUR = 7
-MIN_ARTICLES = 5  # 오늘 랭킹이 이보다 적으면 (이른 아침) 어제 랭킹으로 대체
 URL_RE = re.compile(r"\((https://news\.nate\.com/view/[^)\s]+)\)")
 
 
@@ -82,6 +81,8 @@ def _send(markdown: str, telegram: list[str], no_send: bool) -> None:
 # ---------------- 날씨 ----------------
 
 def run_weather(args: argparse.Namespace) -> int:
+    if not check_secrets(False, not args.no_send):
+        return 1
     day = now_kst().date()
     markdown, telegram = weather.build(day)
     if summary_file := os.environ.get("GITHUB_STEP_SUMMARY"):
@@ -107,7 +108,25 @@ def _previous_urls(day_dir: Path, edition: Edition) -> set[str] | None:
     return urls if found else None
 
 
+def check_secrets(need_claude: bool, need_telegram: bool) -> bool:
+    missing = []
+    if need_claude and not os.environ.get("ANTHROPIC_API_KEY"):
+        missing.append("ANTHROPIC_API_KEY")
+    if need_telegram:
+        missing += [k for k in ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID") if not os.environ.get(k)]
+    if missing:
+        logging.error(
+            "필요한 Secret 이 비어 있습니다: %s — GitHub 저장소 Settings → Secrets and variables → "
+            "Actions → 'Repository secrets' 에 정확한 이름으로 등록했는지 확인하세요.",
+            ", ".join(missing),
+        )
+        return False
+    return True
+
+
 def run_news(args: argparse.Namespace) -> int:
+    if not check_secrets(not args.no_summary, not args.no_send):
+        return 1
     edition = EDITIONS[args.edition]
     today = now_kst().date()
     day = datetime.strptime(args.date, "%Y%m%d").date() if args.date else today
@@ -124,7 +143,7 @@ def run_news(args: argparse.Namespace) -> int:
     # 이른 아침에는 오늘 랭킹이 아직 쌓이지 않았을 수 있어 어제 랭킹으로 보충
     notes: list[str] = []
     if not args.date:
-        thin = {c: n for c, n in sections.items() if len(collected.get(n, [])) < MIN_ARTICLES}
+        thin = {c: n for c, n in sections.items() if len(collected.get(n, [])) < args.top}
         if thin:
             prev = day - timedelta(days=1)
             refill = scraper.collect(thin, prev, args.top)

@@ -106,21 +106,7 @@ def _normalize_url(href: str) -> str:
     return href
 
 
-def fetch_ranking(
-    session: requests.Session, section: str, day: date, top_n: int = 10
-) -> list[Article]:
-    """분야별 '많이 본 뉴스' 랭킹 상위 top_n 개 기사 목록을 가져온다."""
-    url = f"{RANK_URL}?sc={section}&p=day&date={day:%Y%m%d}"
-    soup = BeautifulSoup(_get(session, url), "html.parser")
-
-    # 랭킹 영역만 대상으로 삼고, 없으면 페이지 전체에서 기사 링크를 순서대로 수집
-    scope = (
-        soup.select_one(".postRankSubjectList")
-        or soup.select_one(".mduRankSubject")
-        or soup.select_one("#newsContents")
-        or soup
-    )
-
+def _extract_articles(scope, top_n: int) -> list[Article]:
     articles: list[Article] = []
     seen: set[str] = set()
     for a in scope.find_all("a", href=True):
@@ -138,11 +124,12 @@ def fetch_ranking(
         if container:
             press_el = container.select_one(".medium, .press")
             if press_el:
-                # "언론사 2026-11-12 09:00" 형태에서 언론사만 추출
+                # "언론사 2026-11-12 09:00" 형태에서 날짜(<em>)를 빼고 언론사만 추출
                 em = press_el.find("em")
+                text = press_el.get_text(" ")
                 if em:
-                    em.extract()
-                press = _clean(press_el.get_text(" "))
+                    text = text.replace(em.get_text(" "), "")
+                press = _clean(text)
 
         articles.append(
             Article(
@@ -154,7 +141,46 @@ def fetch_ranking(
         )
         if len(articles) >= top_n:
             break
+    return articles
 
+
+def fetch_ranking(
+    session: requests.Session, section: str, day: date, top_n: int = 10
+) -> list[Article]:
+    """분야별 '많이 본 뉴스' 랭킹 상위 top_n 개 기사 목록을 가져온다."""
+    url = f"{RANK_URL}?sc={section}&p=day&date={day:%Y%m%d}"
+    soup = BeautifulSoup(_get(session, url), "html.parser")
+
+    # 랭킹 영역 후보: 알려진 컨테이너 → 그 상위 요소들 → 페이지 전체.
+    # 1~5위와 6~10위가 서로 다른 블록에 있는 경우가 있어,
+    # top_n 개를 채우는 가장 좁은 영역을 고른다.
+    candidates = []
+    for sel in (".postRankSubjectList", ".mduRankSubject", "#newsContents"):
+        el = soup.select_one(sel)
+        while el is not None and el.name != "[document]":
+            candidates.append(el)
+            el = el.parent
+    candidates.append(soup)
+
+    articles: list[Article] = []
+    for scope in candidates:
+        found = _extract_articles(scope, top_n)
+        if len(found) > len(articles):
+            articles = found
+        if len(articles) >= top_n:
+            break
+
+    if len(articles) < top_n:
+        # 다음 수정 때 참고할 수 있도록 기사 링크를 담은 컨테이너 class 를 기록
+        holders = []
+        for a in soup.find_all("a", href=ARTICLE_RE):
+            parent = a.find_parent(class_=True)
+            if parent is not None:
+                holders.append(".".join(parent.get("class", [])))
+        log.warning(
+            "[%s] 랭킹 기사 %d/%d건만 찾음. 링크 컨테이너: %s",
+            section, len(articles), top_n, sorted(set(holders))[:15],
+        )
     if not articles:
         log.warning("[%s] 랭킹 기사를 찾지 못했습니다: %s", section, url)
     return articles
