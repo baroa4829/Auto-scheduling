@@ -269,7 +269,7 @@ def test_fetch_bodies_stops_after_consecutive_failures(monkeypatch):
     monkeypatch.setattr(scraper, "fetch_body", fake_body)
     arts = {"정치": [scraper.Article(i, f"t{i}", f"u{i}") for i in range(1, 11)]}
     scraper.fetch_bodies(None, arts)
-    assert calls == [1, 2, 3]
+    assert calls == [1, 2, 3, 4, 5, 6]  # 3번 실패 → 한 번 쉬고 재시도 → 또 3번 실패하면 중단
 
 
 def test_skip_already_sent(monkeypatch, tmp_path):

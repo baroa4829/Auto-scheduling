@@ -215,8 +215,9 @@ def fetch_body(session: requests.Session, article: Article) -> None:
 
 
 RANK_DELAY = 1.0  # 랭킹 페이지 사이 간격(초)
-BODY_DELAY = 1.0  # 기사 본문 사이 간격(초). 너무 빠르면 네이트가 요청을 막는다
-MAX_BODY_FAILS = 3  # 본문 요청이 연속으로 이만큼 실패하면 차단된 것으로 보고 본문 수집 중단
+BODY_DELAY = 2.0  # 기사 본문 사이 간격(초). 1초 간격에서는 20건쯤 뒤 네이트가 요청을 막았다
+MAX_BODY_FAILS = 3  # 본문 요청이 연속으로 이만큼 실패하면 차단된 것으로 본다
+COOLDOWN = 60  # 차단 감지 시 한 번만 이만큼 쉬었다가 이어서 시도(초). 또 막히면 중단
 
 
 def collect_rankings(
@@ -239,14 +240,21 @@ def collect_rankings(
 def fetch_bodies(session: requests.Session, collected: dict[str, list[Article]]) -> None:
     """랭킹에 오른 기사들의 본문을 채운다. 연속 실패 시 중단하고 제목만으로 요약하게 둔다."""
     fails = 0
+    cooled = False
     total = sum(len(v) for v in collected.values())
     done = 0
     for name, articles in collected.items():
         for art in articles:
             if fails >= MAX_BODY_FAILS:
-                log.warning("본문 요청이 %d번 연속 실패해 나머지 본문 수집을 건너뜁니다 (%d/%d건 완료)",
-                            MAX_BODY_FAILS, done, total)
-                return
+                if not cooled:
+                    log.warning("본문 요청이 %d번 연속 실패해 %d초 쉬었다가 이어갑니다 (%d/%d건)",
+                                MAX_BODY_FAILS, COOLDOWN, done, total)
+                    time.sleep(COOLDOWN)
+                    cooled, fails = True, 0
+                else:
+                    log.warning("본문 요청이 다시 막혀 나머지 본문 수집을 건너뜁니다 (%d/%d건 완료)",
+                                done, total)
+                    return
             fetch_body(session, art)
             fails = 0 if art.body else fails + 1
             done += 1
