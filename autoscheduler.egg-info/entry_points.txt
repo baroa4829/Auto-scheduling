@@ -1,0 +1,2 @@
+[console_scripts]
+autoscheduler = autoscheduler.cli:main
