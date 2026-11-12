@@ -129,6 +129,9 @@ def create_app(scheduler: Scheduler) -> FastAPI:
         except ValidationError as e:
             raise HTTPException(422, e.errors(include_url=False)) from e
         msg = to_message(payload, settings.tz)
+        preview = msg.text if len(msg.text) <= 40 else msg.text[:40] + "…"
+        log.info("알림 수신: 앱=%s(%s) 방=%s 보낸사람=%s 내용=%s",
+                 payload.app, msg.source, msg.room, msg.sender, preview)
         if msg.source == "other":
             return {"ignored": f"지원하지 않는 앱: {payload.app}"}
         # Claude·캘린더 호출은 블로킹이므로 스레드에서 실행
