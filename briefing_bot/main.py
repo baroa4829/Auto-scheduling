@@ -25,6 +25,8 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
+import requests
+
 from . import notifier, scraper, summarizer, weather
 
 KST = timezone(timedelta(hours=9))
@@ -138,7 +140,9 @@ def run_news(args: argparse.Namespace) -> int:
         return 2
     sections = {c: scraper.SECTIONS[c] for c in codes}
 
-    collected = scraper.collect(sections, day, args.top)
+    # 1) 랭킹(제목)만 먼저 모은다. 본문은 분야 선택이 끝난 뒤 한 번만 가져온다.
+    session = requests.Session()
+    collected = scraper.collect_rankings(session, sections, day, args.top)
 
     # 이른 아침에는 오늘 랭킹이 아직 쌓이지 않았을 수 있어 어제 랭킹으로 보충
     notes: list[str] = []
@@ -146,11 +150,15 @@ def run_news(args: argparse.Namespace) -> int:
         thin = {c: n for c, n in sections.items() if len(collected.get(n, [])) < args.top}
         if thin:
             prev = day - timedelta(days=1)
-            refill = scraper.collect(thin, prev, args.top)
+            refill = scraper.collect_rankings(session, thin, prev, args.top)
             for name, arts in refill.items():
                 if len(arts) > len(collected.get(name, [])):
                     collected[name] = arts
                     notes.append(f"{name}: 오늘 랭킹이 아직 부족해 어제({prev:%m/%d}) 랭킹을 사용했습니다")
+
+    # 2) 본문 수집 (실패해도 제목만으로 요약 진행)
+    scraper.fetch_bodies(session, collected)
+    session.close()
 
     if not any(collected.values()):
         logging.error("수집된 기사가 없습니다. 네이트 페이지 구조가 바뀌었는지 확인하세요.")

@@ -61,11 +61,11 @@ class Article:
     extra: dict = field(default_factory=dict)
 
 
-def _get(session: requests.Session, url: str, *, retries: int = 3) -> str:
+def _get(session: requests.Session, url: str, *, retries: int = 2) -> str:
     last_exc: Exception | None = None
     for attempt in range(retries):
         try:
-            resp = session.get(url, headers=HEADERS, timeout=15)
+            resp = session.get(url, headers=HEADERS, timeout=10)
             resp.raise_for_status()
             return _decode(resp)
         except requests.RequestException as exc:
@@ -214,21 +214,51 @@ def fetch_body(session: requests.Session, article: Article) -> None:
     article.body = body[:MAX_BODY_CHARS]
 
 
+RANK_DELAY = 1.0  # 랭킹 페이지 사이 간격(초)
+BODY_DELAY = 1.0  # 기사 본문 사이 간격(초). 너무 빠르면 네이트가 요청을 막는다
+MAX_BODY_FAILS = 3  # 본문 요청이 연속으로 이만큼 실패하면 차단된 것으로 보고 본문 수집 중단
+
+
+def collect_rankings(
+    session: requests.Session, sections: dict[str, str], day: date, top_n: int = 10
+) -> dict[str, list[Article]]:
+    """모든 분야의 랭킹(제목/링크)만 먼저 수집한다. 요청 수가 적어 차단 위험이 낮다."""
+    result: dict[str, list[Article]] = {}
+    for i, (code, name) in enumerate(sections.items()):
+        if i:
+            time.sleep(RANK_DELAY)
+        try:
+            result[name] = fetch_ranking(session, code, day, top_n)
+        except RuntimeError as exc:
+            log.error("[%s] 랭킹 수집 실패: %s", name, exc)
+            result[name] = []
+        log.info("[%s] 랭킹 %d건 (%s)", name, len(result[name]), f"{day:%m/%d}")
+    return result
+
+
+def fetch_bodies(session: requests.Session, collected: dict[str, list[Article]]) -> None:
+    """랭킹에 오른 기사들의 본문을 채운다. 연속 실패 시 중단하고 제목만으로 요약하게 둔다."""
+    fails = 0
+    total = sum(len(v) for v in collected.values())
+    done = 0
+    for name, articles in collected.items():
+        for art in articles:
+            if fails >= MAX_BODY_FAILS:
+                log.warning("본문 요청이 %d번 연속 실패해 나머지 본문 수집을 건너뜁니다 (%d/%d건 완료)",
+                            MAX_BODY_FAILS, done, total)
+                return
+            fetch_body(session, art)
+            fails = 0 if art.body else fails + 1
+            done += 1
+            time.sleep(BODY_DELAY)
+    log.info("본문 수집 완료: %d건", done)
+
+
 def collect(
-    sections: dict[str, str], day: date, top_n: int = 10, delay: float = 0.3
+    sections: dict[str, str], day: date, top_n: int = 10, delay: float | None = None
 ) -> dict[str, list[Article]]:
     """모든 분야의 랭킹 + 본문을 수집한다."""
-    result: dict[str, list[Article]] = {}
     with requests.Session() as session:
-        for code, name in sections.items():
-            try:
-                articles = fetch_ranking(session, code, day, top_n)
-            except RuntimeError as exc:
-                log.error("[%s] 랭킹 수집 실패: %s", name, exc)
-                articles = []
-            for art in articles:
-                fetch_body(session, art)
-                time.sleep(delay)  # 서버 부하 방지
-            log.info("[%s] %d건 수집", name, len(articles))
-            result[name] = articles
+        result = collect_rankings(session, sections, day, top_n)
+        fetch_bodies(session, result)
     return result
