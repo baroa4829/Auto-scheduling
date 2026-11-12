@@ -1,0 +1,91 @@
+name: Daily Briefing
+
+# 하루 일정 (KST). GitHub 예약 실행은 보통 몇 분~십여 분 늦게 시작되므로
+# 정각보다 10분 일찍 걸어 둔다. (cron 은 UTC 기준)
+on:
+  schedule:
+    - cron: "50 21 * * *"   # 07시 날씨              (06:50 KST)
+    - cron: "50 22 * * *"   # 08시 1차 뉴스 브리핑     (07:50 KST)
+    - cron: "50 2 * * *"    # 12시 2차 뉴스 브리핑     (11:50 KST)
+    - cron: "50 6 * * *"    # 16시 3차 뉴스 브리핑     (15:50 KST)
+    - cron: "50 12 * * *"   # 22시 하루 마무리 브리핑  (21:50 KST)
+  workflow_dispatch:
+    inputs:
+      task:
+        description: "실행할 작업"
+        type: choice
+        options: [weather, morning, noon, afternoon, evening]
+        default: morning
+      sections:
+        description: "뉴스 분야 코드 (pol,eco,soc,int,its,ent,spo), 비우면 기본값"
+        required: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: daily-briefing
+  cancel-in-progress: false
+
+jobs:
+  briefing:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Pick task
+        id: pick
+        env:
+          SCHEDULE: ${{ github.event.schedule }}
+          INPUT_TASK: ${{ inputs.task }}
+        run: |
+          case "$SCHEDULE" in
+            "50 21 * * *") task=weather ;;
+            "50 22 * * *") task=morning ;;
+            "50 2 * * *")  task=noon ;;
+            "50 6 * * *")  task=afternoon ;;
+            "50 12 * * *") task=evening ;;
+            *)             task="$INPUT_TASK" ;;
+          esac
+          echo "task=$task" >> "$GITHUB_OUTPUT"
+          echo "실행 작업: $task"
+
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: Run briefing
+        env:
+          TASK: ${{ steps.pick.outputs.task }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          NATE_SECTIONS: ${{ inputs.sections || vars.NATE_SECTIONS }}
+          WEATHER_LOCATIONS: ${{ vars.WEATHER_LOCATIONS }}
+        run: |
+          if [ "$TASK" = "weather" ]; then
+            python -m briefing_bot.main weather
+          else
+            python -m briefing_bot.main news --edition "$TASK"
+          fi
+
+      - name: Commit briefing archive
+        if: steps.pick.outputs.task != 'weather'
+        env:
+          TASK: ${{ steps.pick.outputs.task }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add briefings/
+          if git diff --cached --quiet; then exit 0; fi
+          git commit -m "briefing: $(TZ=Asia/Seoul date +%Y-%m-%d) $TASK"
+          for i in 1 2 3; do
+            git pull --rebase && git push && break
+            sleep 5
+          done
