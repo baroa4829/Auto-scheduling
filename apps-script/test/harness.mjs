@@ -31,51 +31,6 @@ function parseDate(s, tz, pattern) {
   throw new Error('parse error');
 }
 
-class Range {
-  constructor(sheet, row, col, nr, nc) { Object.assign(this, { sheet, row, col, nr, nc }); }
-  setNumberFormat() { return this; }
-  setValues(values) {
-    values.forEach((rowVals, i) => {
-      const r = this.row + i - 1;
-      while (this.sheet.data.length <= r) this.sheet.data.push([]);
-      rowVals.forEach((v, j) => { this.sheet.data[r][this.col + j - 1] = v; });
-    });
-    return this;
-  }
-  getValues() {
-    const out = [];
-    for (let i = 0; i < this.nr; i++) {
-      const row = this.sheet.data[this.row + i - 1] || [];
-      const vals = [];
-      for (let j = 0; j < this.nc; j++) { const v = row[this.col + j - 1]; vals.push(v === undefined ? '' : v); }
-      out.push(vals);
-    }
-    return out;
-  }
-}
-
-class Sheet {
-  constructor(name) { this.name = name; this.data = []; }
-  getName() { return this.name; }
-  getLastRow() { return this.data.length; }
-  getLastColumn() { return Math.max(0, ...this.data.map((r) => r.length)); }
-  getMaxRows() { return 1000; }
-  insertRowsAfter() {}
-  getRange(row, col, nr = 1, nc = 1) { return new Range(this, row, col, nr, nc); }
-  setFrozenRows() {}
-  deleteRows(start, count) { this.data.splice(start - 1, count); }
-}
-
-class Spreadsheet {
-  constructor() { this.sheets = [new Sheet('Sheet1')]; this.id = 'ss-1'; }
-  getId() { return this.id; }
-  getUrl() { return 'https://docs.google.com/spreadsheets/d/ss-1'; }
-  getSheetByName(n) { return this.sheets.find((s) => s.name === n) || null; }
-  insertSheet(n) { const s = new Sheet(n); this.sheets.push(s); return s; }
-  getSheets() { return this.sheets; }
-  deleteSheet(s) { this.sheets = this.sheets.filter((x) => x !== s); }
-}
-
 class CalEvent {
   constructor(id, title, start, end, opts, allDay) {
     Object.assign(this, { id, title, start, end, allDay, location: opts.location || '', description: opts.description || '', color: null });
@@ -91,7 +46,6 @@ class CalEvent {
 
 export function createEnv({ claudeResponses = [], props = {} } = {}) {
   const store = { ANTHROPIC_API_KEY: 'test-key', ...props };
-  const ss = new Spreadsheet();
   const events = new Map();
   const requests = [];
   const responses = [...claudeResponses];
@@ -105,14 +59,24 @@ export function createEnv({ claudeResponses = [], props = {} } = {}) {
       const ev = new CalEvent('ev' + (events.size + 1), title, start, end, opts, true); events.set(ev.id, ev); return ev;
     },
     getEventById(id) { return events.get(id) || null; },
+    getName() { return '내 캘린더'; },
   };
 
   const ctx = {
     console: { log: (...a) => logs.push(a.join(' ')), warn: (...a) => logs.push(a.join(' ')), error: (...a) => logs.push(a.join(' ')) },
-    PropertiesService: { getScriptProperties: () => ({ getProperty: (k) => store[k] ?? null, setProperty: (k, v) => { store[k] = v; } }) },
+    PropertiesService: {
+      getScriptProperties: () => ({
+        getProperty: (k) => store[k] ?? null,
+        setProperty: (k, v) => {
+          if (Buffer.byteLength(String(v)) > 9216) throw new Error('값이 9KB 를 넘음: ' + k);
+          store[k] = String(v);
+        },
+        deleteProperty: (k) => { delete store[k]; },
+        getProperties: () => ({ ...store }),
+      }),
+    },
     SpreadsheetApp: {
-      create: () => ss,
-      openById: (id) => { if (id !== ss.id) throw new Error('not found'); return ss; },
+      create: () => { throw new Error('요청한 문서를 액세스할 권한이 없습니다.'); },
     },
     CalendarApp: { getDefaultCalendar: () => calendar, getCalendarById: () => calendar, EventColor: { GRAY: '8' } },
     UrlFetchApp: {
@@ -147,7 +111,7 @@ export function createEnv({ claudeResponses = [], props = {} } = {}) {
   vm.createContext(ctx);
   vm.runInContext(CODE, ctx, { filename: 'Code.gs' });
   const run = (code) => vm.runInContext(code, ctx);
-  return { ctx, run, ss, events, requests, logs, store };
+  return { ctx, run, events, requests, logs, store };
 }
 
 /** Claude 응답 본문 */

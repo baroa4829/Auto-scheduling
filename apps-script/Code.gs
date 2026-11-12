@@ -19,8 +19,8 @@ const CONFIG = {
   INCLUDE_TENTATIVE: false,   // true 면 미확정 약속도 [미정] 을 붙여 바로 등록
   DRY_RUN: false,             // true 면 캘린더에 쓰지 않고 로그만 남김
   CONTEXT_MESSAGES: 30,       // 함께 보낼 같은 채팅방의 최근 메시지 수
-  CONTEXT_HOURS: 48,          // 그중 몇 시간 이내 메시지만
-  KEEP_MESSAGES_DAYS: 7,      // 이보다 오래된 메시지는 매일 자동 삭제 (개인정보 보호)
+  CONTEXT_HOURS: 48,          // 그중 몇 시간 이내 메시지만. 이보다 오래된 메시지는 저장하지 않음
+  KEEP_EVENTS_DAYS: 30,       // 지난 지 이 기간이 넘은 일정 기록은 매일 정리 (캘린더 일정은 그대로)
   DUPLICATE_WINDOW_SEC: 180,  // 같은 내용의 알림이 이 시간 안에 다시 오면 무시 (알림 갱신 대비)
   DEFAULT_EVENT_MINUTES: 60,
   // 약속 단어가 없는 답장("좋아", "ㅇㅋ")도 직전 대화가 약속 이야기였다면 Claude에게 보낸다
@@ -35,14 +35,14 @@ const PRICES = {
 };
 const CACHE_WRITE_MULTIPLIER = 1.25;
 
-const SHEET_MESSAGES = '메시지';
-const SHEET_EVENTS = '일정';
-const SHEET_USAGE = '토큰사용량';
-const HEADERS = {
-  [SHEET_MESSAGES]: ['시각(UTC)', '앱', '채팅방', '보낸사람', '내용'],
-  [SHEET_EVENTS]: ['id', '앱', '채팅방', '제목', '시작', '종료', '종일', '장소', '상태', '캘린더ID', '취소', '갱신(UTC)'],
-  [SHEET_USAGE]: ['시각(UTC)', '모델', '앱', '채팅방', '입력', '출력', '캐시읽기', '캐시쓰기', '추정비용(USD)'],
-};
+// 데이터는 스크립트 속성(PropertiesService)에 저장한다. 구글 드라이브 파일을 만들지 않으므로
+// 드라이브가 막힌 계정에서도 동작한다. (값 하나 최대 9KB, 전체 500KB 한도 → 오래된 데이터는 자동 정리)
+const KEY_ROOM = 'm:';       // m:<앱>:<채팅방>  → 최근 메시지 목록
+const KEY_EVENT = 'e:';      // e:<id>          → 등록한 일정
+const KEY_NEXT_ID = 'e_next_id';
+const KEY_USAGE = 'u:';      // u:<yyyy-MM-dd>  → 그날의 모델별 토큰 사용량
+const MAX_VALUE_BYTES = 8500;
+const MAX_STORED_TEXT = 300; // 메시지 한 개당 저장할 최대 글자 수
 
 const SOURCE_LABELS = { kakao: '카카오톡', daangn: '당근' };
 const APP_TO_SOURCE = {
@@ -146,28 +146,9 @@ function doGet(e) {
 
 // ===================== 최초 설정 =====================
 
-/** 편집기에서 한 번 실행하세요. 시트 생성, 토큰 발급, 정리 트리거 설치. */
+/** 편집기에서 한 번 실행하세요. 토큰 발급, 정리 트리거 설치, 권한 확인. */
 function setup() {
-  const props = PropertiesService.getScriptProperties();
-  let ssId = props.getProperty('SPREADSHEET_ID');
-  let ss = null;
-  if (ssId) {
-    try { ss = SpreadsheetApp.openById(ssId); } catch (err) { ss = null; }
-  }
-  if (!ss) {
-    ss = SpreadsheetApp.create('Auto-scheduling 데이터');
-    props.setProperty('SPREADSHEET_ID', ss.getId());
-  }
-  Object.keys(HEADERS).forEach(function (name) {
-    let sh = ss.getSheetByName(name);
-    if (!sh) sh = ss.insertSheet(name);
-    const header = HEADERS[name];
-    sh.getRange(1, 1, 1, header.length).setValues([header]);
-    sh.setFrozenRows(1);
-  });
-  const first = ss.getSheetByName('Sheet1') || ss.getSheetByName('시트1');
-  if (first && ss.getSheets().length > 1) ss.deleteSheet(first);
-
+  const props = props_();
   let token = props.getProperty('WEBHOOK_TOKEN');
   if (!token) {
     token = Utilities.getUuid().replace(/-/g, '');
@@ -175,14 +156,15 @@ function setup() {
   }
 
   ScriptApp.getProjectTriggers().forEach(function (t) {
-    if (t.getHandlerFunction() === 'cleanupOldMessages') ScriptApp.deleteTrigger(t);
+    const fn = t.getHandlerFunction();
+    if (fn === 'cleanupOldMessages' || fn === 'cleanupOldData') ScriptApp.deleteTrigger(t);
   });
-  ScriptApp.newTrigger('cleanupOldMessages').timeBased().everyDays(1).atHour(4).create();
+  ScriptApp.newTrigger('cleanupOldData').timeBased().everyDays(1).atHour(4).create();
 
-  getCalendar_();  // 캘린더 권한 확인
+  const cal = getCalendar_();  // 캘린더 권한 확인
   const hasKey = !!props.getProperty('ANTHROPIC_API_KEY');
   console.log('설정 완료');
-  console.log('데이터 시트: %s', ss.getUrl());
+  console.log('일정을 넣을 캘린더: %s', cal.getName ? cal.getName() : '기본 캘린더');
   console.log('웹훅 토큰 (MacroDroid 의 token 값): %s', token);
   console.log(hasKey ? 'ANTHROPIC_API_KEY 확인됨'
     : '⚠️ ANTHROPIC_API_KEY 가 없습니다. 프로젝트 설정 → 스크립트 속성에 추가하세요.');
@@ -199,16 +181,37 @@ function tryExample() {
   console.log(JSON.stringify(result, null, 2));
 }
 
-/** 매일 실행: 오래된 메시지 삭제 */
+/** 매일 실행: 오래된 메시지·일정 기록·사용량 기록 정리 (캘린더의 일정은 지우지 않음) */
+function cleanupOldData() {
+  const props = props_();
+  const all = props.getProperties();
+  const msgCutoff = new Date(Date.now() - CONFIG.CONTEXT_HOURS * 3600000).toISOString();
+  const eventCutoff = fmt_(new Date(Date.now() - CONFIG.KEEP_EVENTS_DAYS * 86400000), 'yyyy-MM-dd');
+  const usageCutoff = fmt_(new Date(Date.now() - 400 * 86400000), 'yyyy-MM-dd');
+  Object.keys(all).forEach(function (key) {
+    try {
+      if (key.indexOf(KEY_ROOM) === 0) {
+        const list = JSON.parse(all[key]).filter(function (m) { return m.t >= msgCutoff; });
+        if (list.length) props.setProperty(key, JSON.stringify(list)); else props.deleteProperty(key);
+      } else if (key.indexOf(KEY_EVENT) === 0) {
+        if (String(JSON.parse(all[key]).start).slice(0, 10) < eventCutoff) props.deleteProperty(key);
+      } else if (key.indexOf(KEY_USAGE) === 0 && key.slice(KEY_USAGE.length) < usageCutoff) {
+        props.deleteProperty(key);
+      }
+    } catch (err) {
+      console.warn('정리 중 건너뜀: %s', key);
+    }
+  });
+}
+
+/** 예전 버전 트리거 호환용 */
 function cleanupOldMessages() {
-  const sh = sheet_(SHEET_MESSAGES);
-  const last = sh.getLastRow();
-  if (last < 2) return;
-  const cutoff = new Date(Date.now() - CONFIG.KEEP_MESSAGES_DAYS * 86400000).toISOString();
-  const ts = sh.getRange(2, 1, last - 1, 1).getValues();
-  let count = 0;
-  while (count < ts.length && String(ts[count][0]) < cutoff) count++;
-  if (count > 0) sh.deleteRows(2, count);
+  cleanupOldData();
+}
+
+/** 편집기에서 실행: 기억하고 있는 일정 목록을 로그로 보기 */
+function showEvents() {
+  console.log(JSON.stringify(allEvents_(), null, 2));
 }
 
 /** 편집기에서 실행: 토큰 사용량을 로그로 보기 */
@@ -224,7 +227,7 @@ function handleMessage_(msg) {
     report.skipped.push('중복 알림');
     return report;
   }
-  appendRow_(sheet_(SHEET_MESSAGES), [msg.ts.toISOString(), msg.source, msg.room, msg.sender, msg.text]);
+  appendMessage_(msg);
   const context = recentMessages_(msg.source, msg.room, msg.ts);
   const existing = activeEvents_(msg.source, msg.room);
   if (!needsExtraction_(msg, context, existing)) return report;
@@ -480,68 +483,78 @@ function calendarCancel_(calendarId, title) {
   try { ev.setColor(CalendarApp.EventColor.GRAY); } catch (err) { /* 색 변경은 선택 사항 */ }
 }
 
-// ===================== 시트 저장소 =====================
+// ===================== 저장소 (스크립트 속성) =====================
 
-function sheet_(name) {
-  const id = PropertiesService.getScriptProperties().getProperty('SPREADSHEET_ID');
-  if (!id) throw new Error('setup 함수를 먼저 실행하세요');
-  const sh = SpreadsheetApp.openById(id).getSheetByName(name);
-  if (!sh) throw new Error('시트가 없습니다: ' + name + ' (setup 을 다시 실행하세요)');
-  return sh;
+function props_() {
+  return PropertiesService.getScriptProperties();
 }
 
-/** 모든 칸을 '일반 텍스트'로 저장해 시트가 날짜·숫자로 자동 변환하지 않게 한다. */
-function appendRow_(sh, values, numericFrom) {
-  const row = sh.getLastRow() + 1;
-  if (row > sh.getMaxRows()) sh.insertRowsAfter(sh.getMaxRows(), 50);
-  const textCols = numericFrom ? numericFrom - 1 : values.length;
-  sh.getRange(row, 1, 1, textCols).setNumberFormat('@');
-  sh.getRange(row, 1, 1, values.length).setValues([values.map(function (v, i) {
-    return i < textCols ? String(v == null ? '' : v) : v;
-  })]);
-  return row;
+function utf8Bytes_(str) {
+  let n = 0;
+  for (let i = 0; i < str.length; i++) {
+    const c = str.charCodeAt(i);
+    if (c < 0x80) n += 1;
+    else if (c < 0x800) n += 2;
+    else if (c >= 0xd800 && c <= 0xdbff) { n += 4; i++; }
+    else n += 3;
+  }
+  return n;
 }
 
-function lastRows_(sh, maxRows) {
-  const last = sh.getLastRow();
-  if (last < 2) return [];
-  const start = Math.max(2, last - maxRows + 1);
-  return sh.getRange(start, 1, last - start + 1, sh.getLastColumn()).getValues();
+function roomKey_(source, room) {
+  return KEY_ROOM + source + ':' + room;
+}
+
+/** [{t: ISO시각, s: 보낸사람, x: 내용}] */
+function loadRoom_(source, room) {
+  const raw = props_().getProperty(roomKey_(source, room));
+  if (!raw) return [];
+  try { return JSON.parse(raw); } catch (err) { return []; }
+}
+
+function saveRoom_(source, room, list) {
+  const cutoff = new Date(Date.now() - CONFIG.CONTEXT_HOURS * 3600000).toISOString();
+  list = list.filter(function (m) { return m.t >= cutoff; }).slice(-CONFIG.CONTEXT_MESSAGES);
+  let json = JSON.stringify(list);
+  while (list.length > 1 && utf8Bytes_(json) > MAX_VALUE_BYTES) {
+    list.shift();
+    json = JSON.stringify(list);
+  }
+  if (list.length) props_().setProperty(roomKey_(source, room), json);
+  else props_().deleteProperty(roomKey_(source, room));
+}
+
+function appendMessage_(msg) {
+  const list = loadRoom_(msg.source, msg.room);
+  list.push({ t: msg.ts.toISOString(), s: msg.sender, x: String(msg.text).slice(0, MAX_STORED_TEXT) });
+  list.sort(function (a, b) { return a.t < b.t ? -1 : a.t > b.t ? 1 : 0; });
+  saveRoom_(msg.source, msg.room, list);
 }
 
 function isDuplicate_(msg) {
   const windowStart = new Date(msg.ts.getTime() - CONFIG.DUPLICATE_WINDOW_SEC * 1000).toISOString();
-  return lastRows_(sheet_(SHEET_MESSAGES), 200).some(function (r) {
-    return String(r[0]) >= windowStart && r[1] === msg.source && r[2] === msg.room &&
-      r[3] === msg.sender && r[4] === msg.text;
+  const text = String(msg.text).slice(0, MAX_STORED_TEXT);
+  return loadRoom_(msg.source, msg.room).some(function (m) {
+    return m.t >= windowStart && m.s === msg.sender && m.x === text;
   });
 }
 
 function recentMessages_(source, room, until) {
   const since = new Date(until.getTime() - CONFIG.CONTEXT_HOURS * 3600000).toISOString();
   const untilIso = until.toISOString();
-  const rows = lastRows_(sheet_(SHEET_MESSAGES), 2000).filter(function (r) {
-    return r[1] === source && r[2] === room && String(r[0]) >= since && String(r[0]) <= untilIso;
-  });
-  return rows.slice(-CONFIG.CONTEXT_MESSAGES).map(function (r) {
-    return { ts: new Date(String(r[0])), source: r[1], room: r[2], sender: r[3], text: String(r[4]) };
-  });
-}
-
-function rowToEvent_(r, rowIndex) {
-  return {
-    row: rowIndex, id: Number(r[0]), source: r[1], room: r[2], title: r[3], start: String(r[4]),
-    end: String(r[5] || ''), allDay: String(r[6]) === '1', location: String(r[7] || ''),
-    status: r[8], calendarId: String(r[9] || ''), cancelled: String(r[10]) === '1',
-  };
+  return loadRoom_(source, room)
+    .filter(function (m) { return m.t >= since && m.t <= untilIso; })
+    .slice(-CONFIG.CONTEXT_MESSAGES)
+    .map(function (m) { return { ts: new Date(m.t), source: source, room: room, sender: m.s, text: m.x }; });
 }
 
 function allEvents_() {
-  const sh = sheet_(SHEET_EVENTS);
-  const last = sh.getLastRow();
-  if (last < 2) return [];
-  return sh.getRange(2, 1, last - 1, HEADERS[SHEET_EVENTS].length).getValues()
-    .map(function (r, i) { return rowToEvent_(r, i + 2); });
+  const all = props_().getProperties();
+  return Object.keys(all)
+    .filter(function (k) { return k.indexOf(KEY_EVENT) === 0; })
+    .map(function (k) { try { return JSON.parse(all[k]); } catch (err) { return null; } })
+    .filter(function (e) { return e; })
+    .sort(function (a, b) { return a.id - b.id; });
 }
 
 function activeEvents_(source, room) {
@@ -549,35 +562,35 @@ function activeEvents_(source, room) {
 }
 
 function getEvent_(id) {
-  return allEvents_().filter(function (e) { return e.id === id; })[0] || null;
+  const raw = props_().getProperty(KEY_EVENT + id);
+  return raw ? JSON.parse(raw) : null;
 }
 
 function findDuplicate_(source, room, start) {
   return activeEvents_(source, room).filter(function (e) { return e.start === start; })[0] || null;
 }
 
+function saveEvent_(e) {
+  e.updated = new Date().toISOString();
+  props_().setProperty(KEY_EVENT + e.id, JSON.stringify(e));
+}
+
 function insertEvent_(source, room, action, calendarId) {
-  const events = allEvents_();
-  const nextId = events.reduce(function (m, e) { return Math.max(m, e.id || 0); }, 0) + 1;
-  appendRow_(sheet_(SHEET_EVENTS), [
-    nextId, source, room, action.title, action.start, action.end || '', action.all_day ? '1' : '0',
-    action.location || '', action.status, calendarId || '', '0', new Date().toISOString(),
-  ]);
-  return nextId;
+  const props = props_();
+  const id = Number(props.getProperty(KEY_NEXT_ID) || '1');
+  props.setProperty(KEY_NEXT_ID, String(id + 1));
+  saveEvent_({
+    id: id, source: source, room: room, title: action.title, start: action.start, end: action.end || '',
+    allDay: !!action.all_day, location: action.location || '', status: action.status,
+    calendarId: calendarId || '', cancelled: false,
+  });
+  return id;
 }
 
 function updateEvent_(id, fields) {
   const e = getEvent_(id);
   if (!e) return;
-  const merged = Object.assign({}, e, fields);
-  const values = [
-    e.id, e.source, e.room, merged.title, merged.start, merged.end || '', merged.allDay ? '1' : '0',
-    merged.location || '', merged.status, merged.calendarId || '', merged.cancelled ? '1' : '0',
-    new Date().toISOString(),
-  ].map(String);
-  const range = sheet_(SHEET_EVENTS).getRange(e.row, 1, 1, values.length);
-  range.setNumberFormat('@');
-  range.setValues([values]);
+  saveEvent_(Object.assign(e, fields));
 }
 
 // ===================== 토큰 사용량 =====================
@@ -596,30 +609,37 @@ function recordUsage_(model, usage, sourceLabel, room) {
   const cost = costUsd_(model, input, output, cacheRead, cacheWrite);
   console.log('Claude 토큰 사용 [%s / %s] %s: 입력 %s / 출력 %s 토큰 %s', sourceLabel, room, model, input, output,
     cost === null ? '(가격표 없음)' : '≈ $' + cost.toFixed(4));
-  appendRow_(sheet_(SHEET_USAGE),
-    [new Date().toISOString(), model, sourceLabel, room, input, output, cacheRead, cacheWrite, cost === null ? '' : cost], 5);
+  const key = KEY_USAGE + fmt_(new Date(), 'yyyy-MM-dd');
+  const props = props_();
+  let day = {};
+  try { day = JSON.parse(props.getProperty(key) || '{}'); } catch (err) { day = {}; }
+  // 모델별 [호출수, 입력, 출력, 캐시읽기, 캐시쓰기, 추정비용]
+  const row = day[model] || [0, 0, 0, 0, 0, 0];
+  row[0] += 1; row[1] += input; row[2] += output; row[3] += cacheRead; row[4] += cacheWrite; row[5] += cost || 0;
+  day[model] = row;
+  props.setProperty(key, JSON.stringify(day));
 }
 
 function usageSummary_() {
-  const sh = sheet_(SHEET_USAGE);
-  const last = sh.getLastRow();
-  const rows = last < 2 ? [] : sh.getRange(2, 1, last - 1, HEADERS[SHEET_USAGE].length).getValues();
+  const all = props_().getProperties();
   const today = fmt_(new Date(), 'yyyy-MM-dd');
   const month = today.slice(0, 7);
   function empty() { return { calls: 0, input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0, estimated_cost_usd: 0 }; }
   const out = { today: empty(), this_month: empty(), all_time: empty() };
-  rows.forEach(function (r) {
-    const day = fmt_(new Date(String(r[0])), 'yyyy-MM-dd');
+  Object.keys(all).forEach(function (key) {
+    if (key.indexOf(KEY_USAGE) !== 0) return;
+    const day = key.slice(KEY_USAGE.length);
+    let models = {};
+    try { models = JSON.parse(all[key]); } catch (err) { return; }
     const buckets = [out.all_time];
     if (day.slice(0, 7) === month) buckets.push(out.this_month);
     if (day === today) buckets.push(out.today);
-    buckets.forEach(function (b) {
-      b.calls += 1;
-      b.input_tokens += Number(r[4]) || 0;
-      b.output_tokens += Number(r[5]) || 0;
-      b.cache_read_tokens += Number(r[6]) || 0;
-      b.cache_write_tokens += Number(r[7]) || 0;
-      b.estimated_cost_usd += Number(r[8]) || 0;
+    Object.keys(models).forEach(function (model) {
+      const r = models[model];
+      buckets.forEach(function (b) {
+        b.calls += r[0]; b.input_tokens += r[1]; b.output_tokens += r[2];
+        b.cache_read_tokens += r[3]; b.cache_write_tokens += r[4]; b.estimated_cost_usd += r[5];
+      });
     });
   });
   Object.keys(out).forEach(function (k) { out[k].estimated_cost_usd = Math.round(out[k].estimated_cost_usd * 1e6) / 1e6; });

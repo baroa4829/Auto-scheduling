@@ -18,11 +18,15 @@ const tok = (env) => env.store.WEBHOOK_TOKEN;
 const kakao = (env, text, extra = {}) =>
   post(env, { token: tok(env), app: '카카오톡', title: '민수', text, ...extra });
 
-test('setup: 시트·토큰·트리거 생성', () => {
+test('setup: 토큰·트리거 생성 (구글 시트·드라이브 없이)', () => {
   const env = setupEnv();
-  assert.ok(env.store.SPREADSHEET_ID && env.store.WEBHOOK_TOKEN);
-  assert.deepEqual(env.ss.sheets.map((s) => s.name), ['메시지', '일정', '토큰사용량']);
+  assert.ok(env.store.WEBHOOK_TOKEN);
   assert.equal(env.ctx.ScriptApp.triggers.length, 1);
+  assert.equal(env.ctx.ScriptApp.triggers[0].getHandlerFunction(), 'cleanupOldData');
+  assert.ok(env.logs.some((l) => l.includes('ANTHROPIC_API_KEY 확인됨')));
+  const token = env.store.WEBHOOK_TOKEN;
+  env.run('setup()');  // 다시 실행해도 토큰 유지
+  assert.equal(env.store.WEBHOOK_TOKEN, token);
 });
 
 test('토큰이 틀리면 거부', () => {
@@ -175,13 +179,28 @@ test('DRY_RUN 이면 캘린더에 쓰지 않음', () => {
   assert.equal(env.events.size, 0);
 });
 
-test('오래된 메시지 정리', () => {
+test('오래된 메시지·일정 기록 정리', () => {
   const env = setupEnv();
-  const sh = env.ss.getSheetByName('메시지');
-  sh.data.push([new Date(Date.now() - 10 * 86400000).toISOString(), 'kakao', '민수', '민수', '옛날']);
-  sh.data.push([new Date().toISOString(), 'kakao', '민수', '민수', '최근']);
-  env.run('cleanupOldMessages()');
-  assert.deepEqual(sh.data.slice(1).map((r) => r[4]), ['최근']);
+  const old = new Date(Date.now() - 3 * 86400000).toISOString();
+  const recent = new Date().toISOString();
+  env.store['m:kakao:민수'] = JSON.stringify([{ t: old, s: '민수', x: '옛날' }, { t: recent, s: '민수', x: '최근' }]);
+  env.store['m:kakao:철수'] = JSON.stringify([{ t: old, s: '철수', x: '옛날' }]);
+  env.store['e:1'] = JSON.stringify({ id: 1, start: '2020-01-01T10:00' });
+  env.store['e:2'] = JSON.stringify({ id: 2, start: '2999-01-01T10:00' });
+  env.run('cleanupOldData()');
+  assert.deepEqual(JSON.parse(env.store['m:kakao:민수']).map((m) => m.x), ['최근']);
+  assert.equal(env.store['m:kakao:철수'], undefined);
+  assert.equal(env.store['e:1'], undefined);
+  assert.ok(env.store['e:2']);
+});
+
+test('긴 메시지가 많아도 저장 한도(9KB)를 넘지 않음', () => {
+  const env = setupEnv({ claudeResponses: Array.from({ length: 40 }, () => claudeReply([])) });
+  for (let i = 0; i < 40; i++) kakao(env, `${i}번째 ` + '가'.repeat(400) + ' 내일 7시');
+  const list = JSON.parse(env.store['m:kakao:민수']);
+  assert.ok(list.length > 1 && list.length <= 30);
+  assert.ok(Buffer.byteLength(env.store['m:kakao:민수']) <= 8500);
+  assert.match(list[list.length - 1].x, /^39번째/);
 });
 
 test('약속 단어 없는 답장: 직전에 약속 이야기가 있었을 때만 Claude 호출', () => {
