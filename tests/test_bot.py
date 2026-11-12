@@ -203,3 +203,29 @@ def test_news_editions_mark_new_and_fallback(monkeypatch, tmp_path):
     assert main.main(["news", "--edition", "evening", "--sections", "pol", "--out-dir", str(tmp_path)]) == 0
     assert overview_called and "오늘 하루 한눈에" in sent[-1]
     assert sorted(p.name for p in (tmp_path / "2026-11-12").iterdir()) == ["1-morning.md", "2-noon.md", "4-evening.md"]
+
+
+def test_telegram_check(monkeypatch, caplog):
+    caplog.set_level("INFO")
+    class R:
+        def __init__(self, data):
+            self._d, self.ok, self.status_code, self.text = data, True, 200, ""
+
+        def json(self):
+            return self._d
+
+    updates = {"ok": True, "result": [{"message": {"chat": {"id": 555, "first_name": "재훈"}}}]}
+
+    def fake_get(url, **kw):
+        if url.endswith("/getMe"):
+            return R({"ok": True, "result": {"first_name": "News", "username": "news_bot"}})
+        return R(updates)
+
+    posted = []
+    monkeypatch.setattr(notifier.requests, "get", fake_get)
+    monkeypatch.setattr(notifier.requests, "post", lambda url, **kw: posted.append(kw) or R({}))
+
+    assert notifier.telegram_check("t", "999") == 1
+    assert "올바른 채팅 ID: 555" in caplog.text and "@news_bot" in caplog.text
+    assert notifier.telegram_check("t", "555") == 0
+    assert posted and posted[0]["json"]["chat_id"] == "555"

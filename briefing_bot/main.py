@@ -216,6 +216,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     news.add_argument("--no-summary", action="store_true", help="Claude 요약 없이 제목만")
 
     sub.add_parser("auto", parents=[common], help="현재 시각에 맞는 작업 자동 실행")
+    sub.add_parser("telegram-check", help="텔레그램 봇 토큰/채팅 ID 설정 진단")
     return p.parse_args(argv)
 
 
@@ -230,6 +231,12 @@ def main(argv: list[str] | None = None) -> int:
         argv2 = [cmd] + (["--edition", edition] if edition else []) + extra
         args = parse_args(argv2)
 
+    if args.cmd == "telegram-check":
+        if not check_secrets(False, True):
+            return 1
+        return notifier.telegram_check(
+            os.environ["TELEGRAM_BOT_TOKEN"].strip(), os.environ["TELEGRAM_CHAT_ID"]
+        )
     if args.cmd == "weather":
         return run_weather(args)
     return run_news(args)
