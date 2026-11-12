@@ -275,7 +275,8 @@ def fmt_price(q: Quote) -> str:
 
 
 def fmt_change(q: Quote) -> str:
-    arrow = "▲" if q.change > 0 else "▼" if q.change < 0 else "—"
+    # 한국식: 상승 = 빨강 위쪽 삼각형, 하락 = 파랑 아래쪽 삼각형
+    arrow = "🔺" if q.change > 0 else "🔽" if q.change < 0 else "➖"
     if q.item.kind == "rate":
         return f"{arrow}{abs(q.change) * 100:.0f}bp"
     return f"{arrow}{abs(q.change_pct):.2f}%"

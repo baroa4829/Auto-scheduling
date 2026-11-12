@@ -323,12 +323,12 @@ def test_stock_analyze_signals():
     assert "🚀 52주 신고가" in q.signals and "📢 거래량 3.0배" in q.signals
     assert any("급등" in s for s in q.signals)
     assert q.rsi14 is not None and q.rsi14 > 70
-    assert stocks.fmt_price(q) == "130원" and stocks.fmt_change(q).startswith("▲")
+    assert stocks.fmt_price(q) == "130원" and stocks.fmt_change(q).startswith("🔺")
 
 
 def test_stock_fmt_rate_and_fx():
     rate = stocks.analyze(stocks.Item("미 10년물", "^TNX", "rate"), _chart([4.20, 4.25], currency="USD"))
-    assert stocks.fmt_price(rate) == "4.25%" and stocks.fmt_change(rate) == "▲5bp"
+    assert stocks.fmt_price(rate) == "4.25%" and stocks.fmt_change(rate) == "🔺5bp"
     jpy = stocks.analyze(stocks.Item("원/엔", "JPYKRW=X", "fx", 100), _chart([9.0, 9.1]))
     assert stocks.fmt_price(jpy) == "910.00원"
 
@@ -398,3 +398,12 @@ def test_default_watchlist_and_long_telegram_split():
     msgs = stocks.render_telegram("close", date(2026, 11, 12), {"⭐ 관심 종목": qs * 2}, {"headline": "h", "points": ["p"], "watch": ["w"]})
     assert len(msgs) >= 2 and all(len(m) <= 4000 for m in msgs)
     assert sum(m.count("삼성전자") for m in msgs) == 2  # 잘려 나간 종목 없음
+
+
+def test_fmt_change_arrows():
+    up = stocks.analyze(stocks.Item("a", "A"), _chart([100.0, 101.0]))
+    down = stocks.analyze(stocks.Item("b", "B"), _chart([100.0, 99.0]))
+    flat = stocks.analyze(stocks.Item("c", "C"), _chart([100.0, 100.0]))
+    assert stocks.fmt_change(up) == "🔺1.00%"
+    assert stocks.fmt_change(down) == "🔽1.00%"
+    assert stocks.fmt_change(flat) == "➖0.00%"
