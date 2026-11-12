@@ -287,3 +287,104 @@ def test_skip_already_sent(monkeypatch, tmp_path):
     assert main.main(args + ["--force"]) == 0
     assert len(sent) == 2
     assert (tmp_path / "2026-11-13" / "weather-morning.md").exists()
+
+
+# ---------------- 증시 리포트 ----------------
+
+from briefing_bot import stocks
+
+
+def _chart(closes, *, last_day=date(2026, 11, 12), gmtoffset=32400, currency="KRW", volumes=None):
+    """last_day 까지 영업일(월~금) 일봉을 흉내 낸 Yahoo 차트 응답."""
+    days, d = [], last_day
+    while len(days) < len(closes):
+        if d.weekday() < 5:
+            days.append(d)
+        d -= timedelta(days=1)
+    days.reverse()
+    ts = [int(datetime(x.year, x.month, x.day, tzinfo=timezone.utc).timestamp()) - gmtoffset + 9 * 3600
+          for x in days]
+    return {
+        "meta": {"currency": currency, "gmtoffset": gmtoffset},
+        "timestamp": ts,
+        "indicators": {"quote": [{"close": closes, "volume": volumes or [1000] * len(closes)}]},
+    }
+
+
+from datetime import timedelta, timezone  # noqa: E402
+
+
+def test_stock_analyze_signals():
+    closes = [100 + i * 0.1 for i in range(200)] + [130]  # 마지막 날 급등 + 신고가
+    vols = [1000] * 200 + [3000]
+    q = stocks.analyze(stocks.Item("삼성전자", "005930.KS"), _chart(closes, volumes=vols))
+    assert q.last_date == date(2026, 11, 12)
+    assert round(q.change_pct, 1) == round((130 / 119.9 - 1) * 100, 1)
+    assert "🚀 52주 신고가" in q.signals and "📢 거래량 3.0배" in q.signals
+    assert any("급등" in s for s in q.signals)
+    assert q.rsi14 is not None and q.rsi14 > 70
+    assert stocks.fmt_price(q) == "130원" and stocks.fmt_change(q).startswith("▲")
+
+
+def test_stock_fmt_rate_and_fx():
+    rate = stocks.analyze(stocks.Item("미 10년물", "^TNX", "rate"), _chart([4.20, 4.25], currency="USD"))
+    assert stocks.fmt_price(rate) == "4.25%" and stocks.fmt_change(rate) == "▲5bp"
+    jpy = stocks.analyze(stocks.Item("원/엔", "JPYKRW=X", "fx", 100), _chart([9.0, 9.1]))
+    assert stocks.fmt_price(jpy) == "910.00원"
+
+
+def test_parse_watchlist():
+    items = stocks.parse_watchlist("삼성전자:005930.KS, 엔비디아:NVDA,AAPL")
+    assert [(i.name, i.symbol) for i in items] == [("삼성전자", "005930.KS"), ("엔비디아", "NVDA"), ("AAPL", "AAPL")]
+
+
+def test_stock_market_day():
+    kospi = stocks.analyze(stocks.Item("코스피", "^KS11", "index"), _chart([1, 2], last_day=date(2026, 11, 12)))
+    q = {"국내": [kospi]}
+    assert stocks.is_market_day("close", date(2026, 11, 12), q)
+    assert not stocks.is_market_day("close", date(2026, 11, 13), q)  # 13일 데이터 없음 → 휴장
+    # 미국 금요일(현지) 마감 → 한국 토요일 아침 리포트
+    spx = stocks.analyze(stocks.Item("S&P500", "^GSPC", "index"),
+                         _chart([1, 2], last_day=date(2026, 11, 13), gmtoffset=-18000, currency="USD"))
+    assert stocks.is_market_day("morning", date(2026, 11, 14), {"미국": [spx]})
+    assert not stocks.is_market_day("morning", date(2026, 11, 16), {"미국": [spx]})  # 월요일 아침
+
+
+def test_run_stock_end_to_end(monkeypatch, tmp_path):
+    monkeypatch.setattr(main, "now_kst", lambda: datetime(2026, 11, 12, 16, 10, tzinfo=main.KST))
+    monkeypatch.setattr(stocks.time, "sleep", lambda *_: None)
+
+    def fake_get(self, url, **kw):
+        sym = requests.utils.unquote(url.rsplit("/", 1)[1])
+        return SimpleNamespace(raise_for_status=lambda: None,
+                               json=lambda: {"chart": {"result": [_chart([100.0 + i for i in range(30)])]}},
+                               sym=sym)
+
+    monkeypatch.setattr(requests.Session, "get", fake_get)
+    monkeypatch.setattr(stocks, "economy_headlines", lambda day: ["반도체 수출 증가"])
+    seen = {}
+    monkeypatch.setattr(stocks, "market_comment",
+                        lambda ed, q, h: seen.setdefault("h", h) and {"headline": "코스피 상승 마감", "points": ["반도체 강세"], "watch": ["환율"]})
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "x")
+    sent = []
+    monkeypatch.setattr(notifier, "dispatch", lambda md, tg: sent.append((md, tg)) or ["telegram"])
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "t")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "c")
+
+    rc = main.main(["stock", "--edition", "close", "--out-dir", str(tmp_path), "--watchlist", "삼성전자:005930.KS"])
+    assert rc == 0 and seen["h"] == ["반도체 수출 증가"]
+    md, tg = sent[0]
+    assert "📊 장 마감 증시 리포트" in md and "| 삼성전자 |" in md and "코스피 상승 마감" in md
+    assert len(tg) == 1 and "<b>■ ⭐ 관심 종목</b>" in tg[0] and "투자 권유가 아닙니다" in tg[0]
+    assert (tmp_path / "2026-11-12" / "stock-close.md").exists()
+
+    # 같은 날 다시 실행하면 건너뜀, 휴장일(데이터가 어제까지)이면 보내지 않음
+    assert main.main(["stock", "--edition", "close", "--out-dir", str(tmp_path)]) == 0 and len(sent) == 1
+    monkeypatch.setattr(main, "now_kst", lambda: datetime(2026, 11, 13, 16, 10, tzinfo=main.KST))
+    assert main.main(["stock", "--edition", "close", "--out-dir", str(tmp_path)]) == 0 and len(sent) == 1
+    assert not (tmp_path / "2026-11-13" / "stock-close.md").exists()
+
+
+def test_pick_task_stock():
+    assert main.pick_task(datetime(2026, 11, 12, 8, 25, tzinfo=main.KST)) == ("stock", "morning")
+    assert main.pick_task(datetime(2026, 11, 12, 16, 20, tzinfo=main.KST)) == ("stock", "close")

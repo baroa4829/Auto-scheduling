@@ -11,12 +11,14 @@ on:
     - cron: "50 6 * * *"    # 16시 3차 뉴스 브리핑     (15:50 KST)
     - cron: "45 7 * * *"    # 17시 저녁 날씨·내일 예보 (16:45 KST)
     - cron: "50 12 * * *"   # 22시 하루 마무리 브리핑  (21:50 KST)
+    - cron: "20 23 * * 1-5" # 08:30 아침 증시 브리핑   (08:20 KST 화~토, 간밤 미국장 정리)
+    - cron: "0 7 * * 1-5"   # 16:10 장 마감 증시 리포트 (16:00 KST 월~금)
   workflow_dispatch:
     inputs:
       task:
         description: "실행할 작업"
         type: choice
-        options: [weather-morning, weather-evening, morning, noon, afternoon, evening, telegram-check]
+        options: [weather-morning, weather-evening, morning, noon, afternoon, evening, stock-morning, stock-close, telegram-check]
         default: weather-morning
       sections:
         description: "뉴스 분야 코드 (pol,eco,soc,int,its,ent,spo), 비우면 기본값"
@@ -47,6 +49,8 @@ jobs:
             "50 2 * * *")  task=noon ;;
             "50 6 * * *")  task=afternoon ;;
             "50 12 * * *") task=evening ;;
+            "20 23 * * 1-5") task=stock-morning ;;
+            "0 7 * * 1-5")  task=stock-close ;;
             *)             task="$INPUT_TASK" ;;
           esac
           echo "task=$task" >> "$GITHUB_OUTPUT"
@@ -70,6 +74,7 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           NATE_SECTIONS: ${{ inputs.sections || vars.NATE_SECTIONS }}
           WEATHER_LOCATIONS: ${{ vars.WEATHER_LOCATIONS }}
+          STOCK_WATCHLIST: ${{ vars.STOCK_WATCHLIST }}
         run: |
           # 수동 실행은 이미 보낸 브리핑이어도 다시 보낸다
           FORCE=""
@@ -77,6 +82,8 @@ jobs:
           case "$TASK" in
             weather-morning|weather-evening)
               python -m briefing_bot.main weather --edition "${TASK#weather-}" $FORCE ;;
+            stock-morning|stock-close)
+              python -m briefing_bot.main stock --edition "${TASK#stock-}" $FORCE ;;
             telegram-check)
               python -m briefing_bot.main telegram-check ;;
             *)

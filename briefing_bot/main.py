@@ -8,10 +8,15 @@
     17시  weather --edition evening  저녁 날씨 & 내일 예보
     22시  news --edition evening     하루 마무리 뉴스 브리핑
 
+증시 리포트 (KST, 거래일만):
+    08:30 stock --edition morning    간밤 미국 증시 + 환율·원자재 + 관심 종목 (화~토)
+    16:10 stock --edition close      국내 증시 마감 + 아시아 + 관심 종목 (월~금)
+
 사용 예:
     python -m briefing_bot.main weather
     python -m briefing_bot.main news --edition noon
     python -m briefing_bot.main news --edition evening --sections pol,eco --no-send
+    python -m briefing_bot.main stock --edition close --no-send
     python -m briefing_bot.main auto            # 현재 KST 시각에 맞는 작업 실행
 """
 
@@ -28,7 +33,7 @@ from pathlib import Path
 
 import requests
 
-from . import notifier, scraper, summarizer, weather
+from . import notifier, scraper, stocks, summarizer, weather
 
 KST = timezone(timedelta(hours=9))
 
@@ -98,6 +103,35 @@ def run_weather(args: argparse.Namespace) -> int:
     if not check_secrets(False, not args.no_send):
         return 1
     markdown, telegram = weather.build(day, args.edition)
+    _write_outputs(out_path, markdown)
+    _send(markdown, telegram, args.no_send)
+    return 0
+
+
+# ---------------- 증시 ----------------
+
+def run_stock(args: argparse.Namespace) -> int:
+    day = now_kst().date()
+    out_path = Path(args.out_dir) / f"{day:%Y-%m-%d}" / f"stock-{args.edition}.md"
+    if _already_sent(out_path, args.force):
+        return 0
+    if not check_secrets(not args.no_summary, not args.no_send):
+        return 1
+
+    watchlist = stocks.parse_watchlist(args.watchlist)
+    quotes = stocks.collect(args.edition, watchlist)
+    if not any(quotes.values()):
+        logging.error("시세를 하나도 가져오지 못했습니다.")
+        return 1
+    if not args.force and not stocks.is_market_day(args.edition, day, quotes):
+        logging.info("휴장일이라 증시 리포트를 건너뜁니다 (보내려면 --force)")
+        return 0
+
+    comment = None
+    if not args.no_summary:
+        comment = stocks.market_comment(args.edition, quotes, stocks.economy_headlines(day))
+    markdown = stocks.render_markdown(args.edition, day, quotes, comment)
+    telegram = stocks.render_telegram(args.edition, day, quotes, comment)
     _write_outputs(out_path, markdown)
     _send(markdown, telegram, args.no_send)
     return 0
@@ -202,13 +236,14 @@ def run_news(args: argparse.Namespace) -> int:
 # ---------------- 자동 선택 ----------------
 
 WEATHER_TIMES = {"morning": (7, 30), "evening": (17, 0)}
+STOCK_TIMES = {"morning": (8, 30), "close": (16, 10)}
 
 
 def pick_task(now: datetime) -> tuple[str, str]:
     """현재 시각에서 가장 가까운 예정 작업을 고른다 (스케줄러 지연 ±90분 허용)."""
     slots = [("weather", k, h * 60 + m) for k, (h, m) in WEATHER_TIMES.items()] + [
         ("news", e.key, e.hour * 60) for e in EDITIONS.values()
-    ]
+    ] + [("stock", k, h * 60 + m) for k, (h, m) in STOCK_TIMES.items()]
     minutes = now.hour * 60 + now.minute
     best = min(slots, key=lambda s: abs(s[2] - minutes))
     if abs(best[2] - minutes) > 90:
@@ -239,6 +274,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     news.add_argument("--top", type=int, default=int(os.environ.get("TOP_N", 10)))
     news.add_argument("--no-summary", action="store_true", help="Claude 요약 없이 제목만")
 
+    st = sub.add_parser("stock", parents=[common], help="증시 리포트 (morning: 08:30 미국장 정리, close: 16:10 국내장 마감)")
+    st.add_argument("--edition", choices=list(STOCK_TIMES), default="close")
+    st.add_argument("--watchlist", help="관심 종목 '이름:심볼,...' (기본: STOCK_WATCHLIST 변수)")
+    st.add_argument("--no-summary", action="store_true", help="Claude 시장 코멘트 없이 시세만")
+
     sub.add_parser("auto", parents=[common], help="현재 시각에 맞는 작업 자동 실행")
     sub.add_parser("telegram-check", help="텔레그램 봇 토큰/채팅 ID 설정 진단")
     return p.parse_args(argv)
@@ -263,6 +303,8 @@ def main(argv: list[str] | None = None) -> int:
         )
     if args.cmd == "weather":
         return run_weather(args)
+    if args.cmd == "stock":
+        return run_stock(args)
     return run_news(args)
 
 
