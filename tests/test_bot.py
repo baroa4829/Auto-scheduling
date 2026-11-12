@@ -169,7 +169,7 @@ def test_news_editions_mark_new_and_fallback(monkeypatch, tmp_path):
     calls = []
     state = {"titles": ["A", "B", "C", "D", "E", "F"]}
 
-    def fake_collect(sections, day, top_n=10, delay=0.3):
+    def fake_collect(session, sections, day, top_n=10):
         calls.append(day)
         arts = state["titles"] if day == today else ["Y1", "Y2", "Y3", "Y4", "Y5", "Y6"]
         if day == today and state.get("thin"):
@@ -177,7 +177,8 @@ def test_news_editions_mark_new_and_fallback(monkeypatch, tmp_path):
         return {n: [scraper.Article(i + 1, t, f"https://news.nate.com/view/{t}") for i, t in enumerate(arts)]
                 for n in sections.values()}
 
-    monkeypatch.setattr(scraper, "collect", fake_collect)
+    monkeypatch.setattr(scraper, "collect_rankings", fake_collect)
+    monkeypatch.setattr(scraper, "fetch_bodies", lambda session, c: None)
     monkeypatch.setattr(summarizer, "summarize_all", lambda c, tone="": {})
     overview_called = []
     monkeypatch.setattr(summarizer, "summarize_overview", lambda c, s: overview_called.append(1) or ["하루 정리"])
@@ -229,3 +230,16 @@ def test_telegram_check(monkeypatch, caplog):
     assert "올바른 채팅 ID: 555" in caplog.text and "@news_bot" in caplog.text
     assert notifier.telegram_check("t", "555") == 0
     assert posted and posted[0]["json"]["chat_id"] == "555"
+
+
+def test_fetch_bodies_stops_after_consecutive_failures(monkeypatch):
+    monkeypatch.setattr(scraper.time, "sleep", lambda *_: None)
+    calls = []
+
+    def fake_body(session, art):
+        calls.append(art.rank)  # 본문을 못 채움 = 실패
+
+    monkeypatch.setattr(scraper, "fetch_body", fake_body)
+    arts = {"정치": [scraper.Article(i, f"t{i}", f"u{i}") for i in range(1, 11)]}
+    scraper.fetch_bodies(None, arts)
+    assert calls == [1, 2, 3]
