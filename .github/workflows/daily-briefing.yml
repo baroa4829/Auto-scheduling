@@ -1,21 +1,23 @@
 name: Daily Briefing
 
-# 하루 일정 (KST). GitHub 예약 실행은 보통 몇 분~십여 분 늦게 시작되므로
-# 정각보다 10분 일찍 걸어 둔다. (cron 은 UTC 기준)
+# 하루 일정 (KST). GitHub 예약 실행은 몇 분~30분가량 늦게 시작되므로
+# 목표 시각보다 일찍 걸어 둔다. (cron 은 UTC 기준)
+# 늦게 온 예약 실행과 수동 실행이 겹쳐도 같은 브리핑은 한 번만 보낸다 (briefings/ 기록 확인).
 on:
   schedule:
-    - cron: "50 21 * * *"   # 07시 날씨              (06:50 KST)
+    - cron: "15 22 * * *"   # 07:30 오늘의 날씨       (07:15 KST)
     - cron: "50 22 * * *"   # 08시 1차 뉴스 브리핑     (07:50 KST)
     - cron: "50 2 * * *"    # 12시 2차 뉴스 브리핑     (11:50 KST)
     - cron: "50 6 * * *"    # 16시 3차 뉴스 브리핑     (15:50 KST)
+    - cron: "45 7 * * *"    # 17시 저녁 날씨·내일 예보 (16:45 KST)
     - cron: "50 12 * * *"   # 22시 하루 마무리 브리핑  (21:50 KST)
   workflow_dispatch:
     inputs:
       task:
         description: "실행할 작업"
         type: choice
-        options: [weather, morning, noon, afternoon, evening, telegram-check]
-        default: morning
+        options: [weather-morning, weather-evening, morning, noon, afternoon, evening, telegram-check]
+        default: weather-morning
       sections:
         description: "뉴스 분야 코드 (pol,eco,soc,int,its,ent,spo), 비우면 기본값"
         required: false
@@ -39,7 +41,8 @@ jobs:
           INPUT_TASK: ${{ inputs.task }}
         run: |
           case "$SCHEDULE" in
-            "50 21 * * *") task=weather ;;
+            "15 22 * * *") task=weather-morning ;;
+            "45 7 * * *")  task=weather-evening ;;
             "50 22 * * *") task=morning ;;
             "50 2 * * *")  task=noon ;;
             "50 6 * * *")  task=afternoon ;;
@@ -61,20 +64,27 @@ jobs:
       - name: Run briefing
         env:
           TASK: ${{ steps.pick.outputs.task }}
+          EVENT: ${{ github.event_name }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           NATE_SECTIONS: ${{ inputs.sections || vars.NATE_SECTIONS }}
           WEATHER_LOCATIONS: ${{ vars.WEATHER_LOCATIONS }}
         run: |
-          if [ "$TASK" = "weather" ] || [ "$TASK" = "telegram-check" ]; then
-            python -m briefing_bot.main "$TASK"
-          else
-            python -m briefing_bot.main news --edition "$TASK"
-          fi
+          # 수동 실행은 이미 보낸 브리핑이어도 다시 보낸다
+          FORCE=""
+          if [ "$EVENT" = "workflow_dispatch" ]; then FORCE="--force"; fi
+          case "$TASK" in
+            weather-morning|weather-evening)
+              python -m briefing_bot.main weather --edition "${TASK#weather-}" $FORCE ;;
+            telegram-check)
+              python -m briefing_bot.main telegram-check ;;
+            *)
+              python -m briefing_bot.main news --edition "$TASK" $FORCE ;;
+          esac
 
       - name: Commit briefing archive
-        if: steps.pick.outputs.task != 'weather' && steps.pick.outputs.task != 'telegram-check'
+        if: steps.pick.outputs.task != 'telegram-check'
         env:
           TASK: ${{ steps.pick.outputs.task }}
         run: |

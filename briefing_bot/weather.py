@@ -101,7 +101,7 @@ def fetch(loc: Location) -> dict:
             "daily": "weather_code,temperature_2m_max,temperature_2m_min,"
             "precipitation_probability_max,precipitation_sum,uv_index_max",
             "wind_speed_unit": "ms",
-            "forecast_days": 1,
+            "forecast_days": 2,  # 저녁 브리핑에서 내일 예보도 사용
         },
         timeout=15,
     )
@@ -128,11 +128,14 @@ def analyze(loc: Location, data: dict) -> dict:
     rain_sum = daily.get("precipitation_sum", [0])[0] or 0
     uv = daily.get("uv_index_max", [None])[0]
 
-    # 시간대별 요약: 아침(6~9) / 낮(12~15) / 저녁(18~21)
-    slots = {}
+    # 시간대별 요약 (오늘 날짜의 시간만 사용)
     times = hourly.get("time", [])
-    for label, hours in (("아침", range(6, 10)), ("낮", range(12, 16)), ("저녁", range(18, 22))):
-        idx = [i for i, t in enumerate(times) if int(t[11:13]) in hours]
+    today_str = times[0][:10] if times else ""
+    slots = {}
+    for label, hours in (
+        ("아침", range(6, 10)), ("낮", range(12, 16)), ("저녁", range(18, 22)), ("밤", range(21, 24)),
+    ):
+        idx = [i for i, t in enumerate(times) if t.startswith(today_str) and int(t[11:13]) in hours]
         if not idx:
             continue
         temps = [hourly["temperature_2m"][i] for i in idx]
@@ -142,6 +145,15 @@ def analyze(loc: Location, data: dict) -> dict:
             "temp": round(sum(temps) / len(temps)),
             "rain": max(probs),
             "code": max(codes),  # 가장 나쁜 날씨 기준
+        }
+
+    tomorrow = None
+    if len(daily.get("weather_code", [])) > 1:
+        tomorrow = {
+            "code": daily["weather_code"][1],
+            "tmax": round(daily["temperature_2m_max"][1]),
+            "tmin": round(daily["temperature_2m_min"][1]),
+            "rain_prob": (daily.get("precipitation_probability_max") or [0, 0])[1] or 0,
         }
 
     pm10 = pm25 = None
@@ -186,11 +198,38 @@ def analyze(loc: Location, data: dict) -> dict:
         "pm10_grade": pm10_g,
         "pm25_grade": pm25_g,
         "tips": tips,
+        "tomorrow": tomorrow,
     }
 
 
-def render_markdown(day: date, reports: list[dict], weekdays: str = "월화수목금토일") -> str:
-    lines = [f"# 🌤️ 오늘의 날씨 — {day:%Y.%m.%d}({weekdays[day.weekday()]})", ""]
+MORNING_SLOTS = ("아침", "낮", "저녁")
+EVENING_SLOTS = ("저녁", "밤")
+
+
+def _evening_tips(r: dict) -> list[str]:
+    tips = []
+    tonight = [v["rain"] for k, v in r["slots"].items() if k in EVENING_SLOTS]
+    if tonight and max(tonight) >= 50:
+        tips.append("☂️ 오늘 밤 비 소식이 있어요. 퇴근길 우산 챙기세요")
+    t = r.get("tomorrow")
+    if t:
+        if t["rain_prob"] >= 50:
+            tips.append("☂️ 내일 비 소식이 있어요. 우산을 미리 챙겨 두세요")
+        diff = t["tmin"] - r["tmin"]
+        if diff <= -4:
+            tips.append(f"🧥 내일 아침은 오늘보다 {abs(diff)}도 더 추워요")
+        elif diff >= 4:
+            tips.append(f"🌡️ 내일 아침은 오늘보다 {diff}도 포근해요")
+    if "나쁨" in (r["pm10_grade"], r["pm25_grade"]) or "매우나쁨" in (r["pm10_grade"], r["pm25_grade"]):
+        tips.append("😷 미세먼지가 나빠요. 환기는 짧게 하세요")
+    return tips
+
+
+def render_markdown(day: date, reports: list[dict], weekdays: str = "월화수목금토일",
+                    edition: str = "morning") -> str:
+    evening = edition == "evening"
+    title = "🌆 저녁 날씨 & 내일 예보" if evening else "🌤️ 오늘의 날씨"
+    lines = [f"# {title} — {day:%Y.%m.%d}({weekdays[day.weekday()]})", ""]
     for r in reports:
         emoji, desc = _wmo(r["day_code"])
         now_emoji, now_desc = _wmo(r["now_code"])
@@ -198,54 +237,73 @@ def render_markdown(day: date, reports: list[dict], weekdays: str = "월화수�
             f"## {r['name']} {emoji} {desc}",
             f"- 현재 {now_emoji} {now_desc} {r['now_temp']}°C (체감 {r['feels']}°C), "
             f"습도 {r['humidity']}%, 바람 {r['wind']}m/s",
-            f"- 최저 {r['tmin']}°C / 최고 {r['tmax']}°C, 강수확률 {r['rain_prob']}%",
         ]
-        if r["slots"]:
-            slot_txt = " · ".join(
-                f"{k} {_wmo(v['code'])[0]} {v['temp']}°C({v['rain']}%)" for k, v in r["slots"].items()
-            )
+        if not evening:
+            lines.append(f"- 최저 {r['tmin']}°C / 최고 {r['tmax']}°C, 강수확률 {r['rain_prob']}%")
+        keys = EVENING_SLOTS if evening else MORNING_SLOTS
+        slot_txt = " · ".join(
+            f"{k} {_wmo(v['code'])[0]} {v['temp']}°C({v['rain']}%)"
+            for k, v in r["slots"].items() if k in keys
+        )
+        if slot_txt:
             lines.append(f"- {slot_txt}")
+        if evening and r.get("tomorrow"):
+            t = r["tomorrow"]
+            te, td = _wmo(t["code"])
+            lines.append(f"- 내일 {te} {td} 최저 {t['tmin']}°C / 최고 {t['tmax']}°C, 강수확률 {t['rain_prob']}%")
         if r["pm10"] is not None:
             lines.append(
                 f"- 미세먼지 {r['pm10_grade']}({round(r['pm10'])}㎍/㎥) · "
                 f"초미세먼지 {r['pm25_grade']}({round(r['pm25'])}㎍/㎥)"
             )
-        if r["tips"]:
+        tips = _evening_tips(r) if evening else r["tips"]
+        if tips:
             lines.append("")
-            lines += [f"> {t}" for t in r["tips"]]
+            lines += [f"> {t}" for t in tips]
         lines.append("")
     return "\n".join(lines).rstrip() + "\n"
 
 
-def render_telegram(day: date, reports: list[dict], weekdays: str = "월화수목금토일") -> list[str]:
+def render_telegram(day: date, reports: list[dict], weekdays: str = "월화수목금토일",
+                    edition: str = "morning") -> list[str]:
+    evening = edition == "evening"
     msgs = []
     for r in reports:
         emoji, desc = _wmo(r["day_code"])
         now_emoji, now_desc = _wmo(r["now_code"])
-        buf = [
-            f"🌤️ <b>오늘의 날씨 · {html.escape(r['name'])}</b>  {day:%m/%d}({weekdays[day.weekday()]})",
-            "",
-            f"{emoji} <b>{desc}</b>  최저 {r['tmin']}° / 최고 {r['tmax']}°",
-            f"지금 {now_emoji} {now_desc} {r['now_temp']}° (체감 {r['feels']}°)",
-            f"강수확률 {r['rain_prob']}% · 습도 {r['humidity']}% · 바람 {r['wind']}m/s",
+        head = "🌆 <b>저녁 날씨 · " if evening else "🌤️ <b>오늘의 날씨 · "
+        buf = [f"{head}{html.escape(r['name'])}</b>  {day:%m/%d}({weekdays[day.weekday()]})", ""]
+        if evening:
+            buf.append(f"지금 {now_emoji} {now_desc} {r['now_temp']}° (체감 {r['feels']}°)")
+        else:
+            buf += [
+                f"{emoji} <b>{desc}</b>  최저 {r['tmin']}° / 최고 {r['tmax']}°",
+                f"지금 {now_emoji} {now_desc} {r['now_temp']}° (체감 {r['feels']}°)",
+                f"강수확률 {r['rain_prob']}% · 습도 {r['humidity']}% · 바람 {r['wind']}m/s",
+            ]
+        keys = EVENING_SLOTS if evening else MORNING_SLOTS
+        slot_lines = [
+            f"{k}  {_wmo(v['code'])[0]} {v['temp']}°  ☔{v['rain']}%"
+            for k, v in r["slots"].items() if k in keys
         ]
-        if r["slots"]:
+        if slot_lines:
             buf.append("")
-            for k, v in r["slots"].items():
-                buf.append(f"{k}  {_wmo(v['code'])[0]} {v['temp']}°  ☔{v['rain']}%")
+            buf += slot_lines
+        if evening and r.get("tomorrow"):
+            t = r["tomorrow"]
+            te, td = _wmo(t["code"])
+            buf += ["", f"<b>내일</b> {te} {td}  최저 {t['tmin']}° / 최고 {t['tmax']}°  ☔{t['rain_prob']}%"]
         if r["pm10"] is not None:
+            buf += ["", f"미세먼지 {r['pm10_grade']} · 초미세먼지 {r['pm25_grade']}"]
+        tips = _evening_tips(r) if evening else r["tips"]
+        if tips:
             buf.append("")
-            buf.append(
-                f"미세먼지 {r['pm10_grade']} · 초미세먼지 {r['pm25_grade']}"
-            )
-        if r["tips"]:
-            buf.append("")
-            buf += [html.escape(t) for t in r["tips"]]
+            buf += [html.escape(t) for t in tips]
         msgs.append("\n".join(buf))
     return msgs
 
 
-def build(day: date) -> tuple[str, list[str]]:
+def build(day: date, edition: str = "morning") -> tuple[str, list[str]]:
     """(마크다운, 텔레그램 메시지 목록) 반환."""
     reports = []
     for loc in parse_locations():
@@ -255,4 +313,7 @@ def build(day: date) -> tuple[str, list[str]]:
             log.error("날씨 조회 실패 (%s): %s", loc.name, exc)
     if not reports:
         raise RuntimeError("날씨 정보를 가져오지 못했습니다")
-    return render_markdown(day, reports), render_telegram(day, reports)
+    return (
+        render_markdown(day, reports, edition=edition),
+        render_telegram(day, reports, edition=edition),
+    )
