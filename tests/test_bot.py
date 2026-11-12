@@ -162,6 +162,14 @@ def test_weather_evening_edition():
     assert "🌆 <b>저녁 날씨" in tg[0] and "<b>내일</b>" in tg[0]
 
 
+def test_weather_multi_location_single_message():
+    r1 = weather.analyze(weather.Location("동탄9동", 37.1, 127.1), FAKE_WEATHER)
+    r2 = weather.analyze(weather.Location("반월동", 37.2, 127.0), FAKE_WEATHER)
+    tg = weather.render_telegram(date(2026, 11, 13), [r1, r2])
+    assert len(tg) == 1 and "동탄9동" in tg[0] and "반월동" in tg[0]
+    assert [l.name for l in weather.parse_locations(weather.DEFAULT_LOCATIONS)] == ["화성 동탄9동", "화성 반월동"]
+
+
 def test_parse_locations():
     locs = weather.parse_locations("서울:37.5:127.0, 부산:35.1:129.0")
     assert [l.name for l in locs] == ["서울", "부산"]

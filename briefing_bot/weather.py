@@ -47,8 +47,8 @@ WMO: dict[int, tuple[str, str]] = {
     99: ("⛈️", "강한 우박 뇌우"),
 }
 
-# 기본 지역: 경기 화성시 동탄9동 (신동 일대)
-DEFAULT_LOCATIONS = "화성 동탄9동:37.1830:127.1130"
+# 기본 지역: 경기 화성시 동탄9동(신동 일대), 반월동(병점구)
+DEFAULT_LOCATIONS = "화성 동탄9동:37.1830:127.1130,화성 반월동:37.2220:127.0650"
 
 
 @dataclass
@@ -300,7 +300,9 @@ def render_telegram(day: date, reports: list[dict], weekdays: str = "월화수�
             buf.append("")
             buf += [html.escape(t) for t in tips]
         msgs.append("\n".join(buf))
-    return msgs
+    # 여러 지역을 한 메시지로 묶어 보낸다 (텔레그램 메시지 길이 제한 4096자 이내일 때)
+    joined = "\n\n━━━━━━━━━━\n\n".join(msgs)
+    return [joined] if len(joined) <= 4000 else msgs
 
 
 def build(day: date, edition: str = "morning") -> tuple[str, list[str]]:
