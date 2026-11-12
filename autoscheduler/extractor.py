@@ -4,12 +4,13 @@ from __future__ import annotations
 import logging
 import re
 from datetime import datetime
-from typing import Protocol, Sequence
+from typing import Callable, Protocol, Sequence
 
 import anthropic
 
 from .models import ChatMessage, ExtractionResult
 from .store import StoredEvent
+from .usage import Usage, from_response
 
 log = logging.getLogger(__name__)
 
@@ -79,9 +80,16 @@ class Extractor(Protocol):
 
 
 class ClaudeExtractor:
-    def __init__(self, model: str = "claude-opus-5-5", client: anthropic.Anthropic | None = None):
+    def __init__(
+        self,
+        model: str = "claude-opus-5-5",
+        client: anthropic.Anthropic | None = None,
+        on_usage: Callable[[Usage, str, str], None] | None = None,
+    ):
         self.model = model
         self.client = client or anthropic.Anthropic()
+        # 호출마다 (사용량, 앱, 채팅방) 을 넘겨받는 콜백 — 보통 Store.record_usage
+        self.on_usage = on_usage
 
     def extract(
         self, messages: Sequence[ChatMessage], existing: Sequence[StoredEvent],
@@ -101,6 +109,10 @@ class ClaudeExtractor:
             betas=["server-side-fallback-2026-07-01"],
             fallbacks="default",
         )
+        usage = from_response(response)
+        log.info("Claude 토큰 사용 [%s / %s] %s", source_label, room, usage.describe())
+        if self.on_usage is not None:
+            self.on_usage(usage, source_label, room)
         if response.stop_reason == "refusal":
             category = response.stop_details.category if response.stop_details else None
             log.warning("Claude가 요청을 거절했습니다 (category=%s). 이 대화는 건너뜁니다.", category)

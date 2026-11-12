@@ -155,3 +155,39 @@ def test_webhook_form_body():
                     content="app=com.kakao.talk&title=%EB%AF%BC%EC%88%98&text=%EB%82%B4%EC%9D%BC+7%EC%8B%9C",
                     headers={"content-type": "application/x-www-form-urlencoded"})
     assert r.status_code == 200 and extractor.calls[0][0][-1].text == "내일 7시"
+
+
+def test_usage_recorded_and_priced():
+    import json as _json
+
+    import anthropic
+    import httpx2
+
+    from autoscheduler.extractor import ClaudeExtractor
+    from autoscheduler.usage import Usage
+
+    def handler(req):
+        return httpx2.Response(200, json={
+            "id": "m", "type": "message", "role": "assistant", "model": "claude-opus-5-5",
+            "content": [{"type": "text", "text": _json.dumps({"events": []})}],
+            "stop_reason": "end_turn", "stop_sequence": None,
+            "usage": {"input_tokens": 1000, "output_tokens": 200, "cache_read_input_tokens": 0,
+                      "cache_creation_input_tokens": 0},
+        })
+
+    store = Store(":memory:")
+    client = anthropic.Anthropic(api_key="x", http_client=httpx2.Client(transport=httpx2.MockTransport(handler)))
+    ex = ClaudeExtractor(client=client, on_usage=lambda u, s, r: store.record_usage(u, s, r))
+    ex.extract([msg("내일 7시", 1)], [], "카카오톡", "민수")
+    ex.extract([msg("내일 8시", 2)], [], "카카오톡", "민수")
+    [u] = store.usage_summary()
+    assert (u.calls, u.input_tokens, u.output_tokens) == (2, 2000, 400)
+    assert abs(u.cost_usd - (2000 * 4 + 400 * 20) / 1e6) < 1e-12
+    assert Usage("unknown-model", 10, 10).cost_usd is None
+
+    s, _, _ = make([])
+    s.store = store
+    client2 = TestClient(create_app(s))
+    assert client2.get("/usage").status_code == 401
+    body = client2.get("/usage?token=t").json()
+    assert body["all_time"]["calls"] == 2 and body["today"]["input_tokens"] == 2000

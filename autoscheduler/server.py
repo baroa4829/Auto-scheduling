@@ -75,6 +75,34 @@ def create_app(scheduler: Scheduler) -> FastAPI:
     def health() -> dict:
         return {"ok": True, "dry_run": settings.dry_run}
 
+    @app.get("/usage")
+    def usage(request: Request) -> dict:
+        """토큰 사용량 (오늘 / 이번 달 / 전체). ?token=... 또는 X-Auth-Token 필요"""
+        check(request.headers.get("x-auth-token") or request.query_params.get("token"))
+        now = datetime.now(settings.tz)
+        today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+
+        def summarize(rows):
+            known = [u.cost_usd for u in rows if u.cost_usd is not None]
+            return {
+                "calls": sum(u.calls for u in rows),
+                "input_tokens": sum(u.input_tokens for u in rows),
+                "output_tokens": sum(u.output_tokens for u in rows),
+                "cache_read_tokens": sum(u.cache_read_tokens for u in rows),
+                "cache_write_tokens": sum(u.cache_write_tokens for u in rows),
+                "estimated_cost_usd": round(sum(known), 6),
+                "by_model": [{"model": u.model, "calls": u.calls, "input_tokens": u.input_tokens,
+                              "output_tokens": u.output_tokens, "estimated_cost_usd": u.cost_usd}
+                             for u in rows],
+            }
+
+        store = scheduler.store
+        return {
+            "today": summarize(store.usage_summary(since=today)),
+            "this_month": summarize(store.usage_summary(since=today.replace(day=1))),
+            "all_time": summarize(store.usage_summary()),
+        }
+
     @app.post("/webhook/notification")
     async def notification(request: Request) -> dict:
         """JSON 본문, form-urlencoded 본문, URL 쿼리 파라미터 중 어느 방식으로 보내도 된다.

@@ -123,6 +123,20 @@ Tasker 등 다른 앱도 같은 주소로 보내면 됩니다. 본문은 JSON(`{
 - 일정 설명란에 근거가 된 메시지가 적혀 있어 왜 등록됐는지 확인할 수 있습니다.
 - 데이터는 `data/autoscheduler.db`(SQLite)에 저장됩니다.
 
+## 토큰 사용량 확인
+
+Claude를 호출할 때마다 사용한 토큰 수가 `data/autoscheduler.db` 에 기록되고 로그에도 찍힙니다.
+
+```
+INFO autoscheduler.extractor: Claude 토큰 사용 [카카오톡 / 민수] claude-opus-5-5: 호출 1회, 입력 1,240 / 출력 310 토큰 ≈ $0.0112
+```
+
+- `autoscheduler usage` — 오늘 / 이번 달 / 전체 사용량과 추정 비용
+- `import-kakao` 실행이 끝나면 그 실행에서 쓴 사용량을 함께 출력
+- 서버 실행 중에는 `GET /usage?token=<토큰>` 으로 JSON 확인 (휴대폰 브라우저에서도 가능)
+
+비용은 토큰 수 × 공개 단가(`autoscheduler/usage.py` 의 `PRICES`)로 계산한 **추정치**입니다. 정확한 청구액은 console.anthropic.com 에서 확인하세요.
+
 ## 설정 (.env)
 
 | 변수 | 기본값 | 설명 |
@@ -150,4 +164,5 @@ pytest
 | `autoscheduler/pipeline.py` | 생성/수정/취소·중복·미확정 처리 |
 | `autoscheduler/gcal.py` | 구글 캘린더 OAuth·이벤트 생성/수정 |
 | `autoscheduler/server.py` | 알림 웹훅 (FastAPI) |
-| `autoscheduler/cli.py` | `auth` / `import-kakao` / `serve` 명령 |
+| `autoscheduler/usage.py` | 토큰 사용량·추정 비용 계산 |
+| `autoscheduler/cli.py` | `auth` / `import-kakao` / `usage` / `serve` 명령 |

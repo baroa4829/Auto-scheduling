@@ -3,10 +3,11 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .models import ChatMessage
+from .usage import Usage
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS messages (
@@ -34,6 +35,19 @@ CREATE TABLE IF NOT EXISTS events (
     updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_events_room ON events(source, room);
+
+CREATE TABLE IF NOT EXISTS api_usage (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts TEXT NOT NULL,
+    model TEXT NOT NULL,
+    source TEXT,
+    room TEXT,
+    input_tokens INTEGER NOT NULL,
+    output_tokens INTEGER NOT NULL,
+    cache_read_tokens INTEGER NOT NULL,
+    cache_write_tokens INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_usage_ts ON api_usage(ts);
 """
 
 
@@ -130,3 +144,26 @@ class Store:
             (source, room, start),
         ).fetchone()
         return self._row_to_event(r) if r else None
+
+    # ---- API usage ----
+    def record_usage(self, usage: Usage, source: str | None = None, room: str | None = None) -> None:
+        self.conn.execute(
+            "INSERT INTO api_usage (ts, model, source, room, input_tokens, output_tokens, "
+            "cache_read_tokens, cache_write_tokens) VALUES (?,?,?,?,?,?,?,?)",
+            (datetime.now(timezone.utc).isoformat(), usage.model, source, room, usage.input_tokens,
+             usage.output_tokens, usage.cache_read_tokens, usage.cache_write_tokens),
+        )
+        self.conn.commit()
+
+    def usage_summary(self, since: datetime | None = None) -> list[Usage]:
+        """since 이후(없으면 전체) 사용량을 모델별로 합산."""
+        where, params = "", ()
+        if since is not None:
+            where, params = "WHERE ts >= ?", (since.astimezone(timezone.utc).isoformat(),)
+        rows = self.conn.execute(
+            "SELECT model, COUNT(*) calls, SUM(input_tokens) i, SUM(output_tokens) o, "
+            f"SUM(cache_read_tokens) cr, SUM(cache_write_tokens) cw FROM api_usage {where} "
+            "GROUP BY model ORDER BY model",
+            params,
+        ).fetchall()
+        return [Usage(r["model"], r["i"], r["o"], r["cr"], r["cw"], r["calls"]) for r in rows]

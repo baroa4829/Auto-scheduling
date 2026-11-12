@@ -20,7 +20,31 @@ def _scheduler(settings: Settings):
         DryRunCalendar() if settings.dry_run
         else GoogleCalendar(settings.credentials_file, settings.token_file, settings.calendar_id)
     )
-    return Scheduler(settings, Store(settings.db_path), ClaudeExtractor(settings.model), calendar)
+    store = Store(settings.db_path)
+    extractor = ClaudeExtractor(
+        settings.model,
+        on_usage=lambda usage, source, room: store.record_usage(usage, source, room),
+    )
+    return Scheduler(settings, store, extractor, calendar)
+
+
+def _print_usage(title: str, rows) -> None:
+    print(f"\n[{title}]")
+    if not rows:
+        print("  Claude 호출 없음")
+        return
+    total_cost = 0.0
+    unknown = False
+    for u in rows:
+        print("  " + u.describe())
+        if u.cost_usd is None:
+            unknown = True
+        else:
+            total_cost += u.cost_usd
+    calls = sum(u.calls for u in rows)
+    tokens = sum(u.total_tokens for u in rows)
+    suffix = " (일부 모델 가격 제외)" if unknown else ""
+    print(f"  합계: 호출 {calls}회, {tokens:,} 토큰, ≈ ${total_cost:.4f}{suffix}")
 
 
 def cmd_auth(settings: Settings, args) -> None:
@@ -40,8 +64,23 @@ def cmd_import(settings: Settings, args) -> None:
     if args.since:
         since = datetime.fromisoformat(args.since).replace(tzinfo=settings.tz)
     print(f"{len(messages)}개 메시지 읽음 (방: {messages[0].room})")
-    report = _scheduler(settings).import_messages(messages, since=since)
+    started = datetime.now().astimezone()
+    scheduler = _scheduler(settings)
+    report = scheduler.import_messages(messages, since=since)
     print(json.dumps(report.as_dict(), ensure_ascii=False, indent=2))
+    _print_usage("이번 실행의 토큰 사용량", scheduler.store.usage_summary(since=started))
+
+
+def cmd_usage(settings: Settings, args) -> None:
+    from .store import Store
+
+    store = Store(settings.db_path)
+    now = datetime.now().astimezone()
+    today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    _print_usage(f"오늘 ({today:%Y-%m-%d})", store.usage_summary(since=today))
+    _print_usage(f"이번 달 ({today:%Y-%m})", store.usage_summary(since=today.replace(day=1)))
+    _print_usage("전체", store.usage_summary())
+    print("\n※ 비용은 토큰 수 × 공개 단가로 계산한 추정치입니다. 정확한 청구액은 console.anthropic.com 에서 확인하세요.")
 
 
 def cmd_serve(settings: Settings, args) -> None:
@@ -69,6 +108,9 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--room", help="채팅방 이름 (파일 첫 줄에서 자동 인식)")
     p.add_argument("--since", help="이 날짜 이후 메시지만 처리 (예: 2026-11-01)")
     p.set_defaults(func=cmd_import)
+
+    p = sub.add_parser("usage", help="Claude API 토큰 사용량·추정 비용 보기")
+    p.set_defaults(func=cmd_usage)
 
     p = sub.add_parser("serve", help="휴대폰 알림을 받는 웹훅 서버 실행")
     p.add_argument("--host", default="0.0.0.0")
