@@ -1,8 +1,11 @@
 """주식 시장 동향 리포트: Yahoo Finance 차트 API(키 불필요)로 시세를 모아 정리한다.
 
-에디션
-    morning  08:30 KST  간밤 미국 증시 마감 + 환율·원자재·금리 + 관심 종목 → 오늘 국내장 체크포인트
-    close    16:10 KST  국내 증시 마감 + 아시아 증시 + 환율 + 관심 종목 → 오늘 장 정리
+에디션 (KST)
+    kr_open   09:03  국장 개장 3분 후      간밤 미국 + 환율 + 국내 관심 종목
+    kr_noon   12:00  국장 정오 점검        국내·아시아 증시 + 국내 관심 종목
+    kr_close  15:20  국장 마감 10분 전     국내 증시 + 국내 관심 종목
+    us_open   23:33  미장 개장 3분 후      (서머타임엔 22:33) 미국 지수·원자재·금리 + 미국 관심 종목
+    us_close  07:00  미국 증시 마감 브리핑  간밤 마감 정리 + 환율·원자재·금리 + 미국 관심 종목
 """
 
 from __future__ import annotations
@@ -14,10 +17,14 @@ import os
 import time
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import requests
 
 log = logging.getLogger(__name__)
+
+KST = ZoneInfo("Asia/Seoul")
+NY = ZoneInfo("America/New_York")
 
 CHART_URLS = (
     "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}",
@@ -54,54 +61,102 @@ class Item:
     kind: str = "stock"  # index | fx | commodity | rate | crypto | stock
     scale: float = 1.0  # 표시 단위 보정 (예: 원/엔을 100엔 기준으로)
 
+    @property
+    def is_kr(self) -> bool:
+        return self.symbol.endswith((".KS", ".KQ"))
+
+
+@dataclass(frozen=True)
+class Spec:
+    title: str
+    market: str  # "kr" | "us" — 휴장 판단·관심 종목 필터 기준
+    tz: ZoneInfo  # 목표 시각을 정하는 시간대 (미국 개장은 뉴욕 시각 → 서머타임 자동 반영)
+    hour: int
+    minute: int
+    intraday: bool  # 장중 시세인가 (거래량 배수 신호를 끈다)
+    when: str  # Claude 프롬프트용 설명
+    watch_hint: str
+
+
+SPECS: dict[str, Spec] = {
+    "kr_open": Spec("🔔 국장 개장 3분 후", "kr", KST, 9, 3, True,
+                    "국내 정규장 개장 3분 뒤라 국내 시세는 장 초반 값이다",
+                    "간밤 미국장과 환율을 바탕으로 오늘 국내장에서 지켜볼 점"),
+    "kr_noon": Spec("☀️ 국장 정오 점검", "kr", KST, 12, 0, True,
+                    "국내 정규장 오전 흐름을 점검하는 정오 시점이다",
+                    "오전장 흐름을 바탕으로 오후장에서 지켜볼 점"),
+    "kr_close": Spec("⏰ 국장 마감 10분 전", "kr", KST, 15, 20, True,
+                     "국내 정규장 마감 10분 전이라 종가가 아직 확정되지 않았다",
+                     "마감 직전 흐름을 바탕으로 종가 부근과 오늘 밤 미국장에서 지켜볼 점"),
+    "us_open": Spec("🗽 미장 개장 3분 후", "us", NY, 9, 33, True,
+                    "미국 정규장 개장 3분 뒤라 미국 시세는 장 초반 값이다",
+                    "개장 직후 흐름을 바탕으로 오늘 밤 미국장에서 지켜볼 점"),
+    "us_close": Spec("🌅 미국 증시 마감 브리핑", "us", KST, 7, 0, False,
+                     "미국 정규장이 마감된 뒤 국내 개장 전에 쓰는 아침 브리핑이다",
+                     "간밤 미국장 마감과 환율을 바탕으로 오늘 국내장에서 지켜볼 점"),
+}
+
+ANCHOR = {"kr": "^KS11", "us": "^GSPC"}  # 휴장 판별 기준 지표
 
 # 에디션별 시장 지표 묶음 (그룹 제목 → 항목)
+_US_INDICES = [
+    Item("S&P500", "^GSPC", "index"),
+    Item("나스닥", "^IXIC", "index"),
+    Item("다우", "^DJI", "index"),
+    Item("필라델피아 반도체", "^SOX", "index"),
+    Item("VIX(공포지수)", "^VIX", "index"),
+]
+_MACRO = [
+    Item("원/달러", "KRW=X", "fx"),
+    Item("달러인덱스", "DX-Y.NYB", "index"),
+    Item("WTI 유가", "CL=F", "commodity"),
+    Item("금", "GC=F", "commodity"),
+    Item("미 10년물 금리", "^TNX", "rate"),
+    Item("비트코인", "BTC-USD", "crypto"),
+]
+_KR_INDICES = [Item("코스피", "^KS11", "index"), Item("코스닥", "^KQ11", "index")]
+_ASIA = [
+    Item("닛케이225", "^N225", "index"),
+    Item("상해종합", "000001.SS", "index"),
+    Item("항셍", "^HSI", "index"),
+]
+
 MARKETS: dict[str, dict[str, list[Item]]] = {
-    "morning": {
-        "🇺🇸 미국 증시": [
-            Item("S&P500", "^GSPC", "index"),
-            Item("나스닥", "^IXIC", "index"),
-            Item("다우", "^DJI", "index"),
-            Item("필라델피아 반도체", "^SOX", "index"),
-            Item("VIX(공포지수)", "^VIX", "index"),
-        ],
-        "💱 환율·원자재·금리": [
-            Item("원/달러", "KRW=X", "fx"),
-            Item("달러인덱스", "DX-Y.NYB", "index"),
-            Item("WTI 유가", "CL=F", "commodity"),
-            Item("금", "GC=F", "commodity"),
-            Item("미 10년물 금리", "^TNX", "rate"),
-            Item("비트코인", "BTC-USD", "crypto"),
-        ],
+    "kr_open": {
+        "🇰🇷 국내 증시": _KR_INDICES,
+        "🇺🇸 간밤 미국 증시": _US_INDICES[:2] + [_US_INDICES[3]],
+        "💱 환율": [Item("원/달러", "KRW=X", "fx")],
     },
-    "close": {
-        "🇰🇷 국내 증시": [
-            Item("코스피", "^KS11", "index"),
-            Item("코스닥", "^KQ11", "index"),
-        ],
-        "🌏 아시아 증시": [
-            Item("닛케이225", "^N225", "index"),
-            Item("상해종합", "000001.SS", "index"),
-            Item("항셍", "^HSI", "index"),
-        ],
-        "💱 환율": [
-            Item("원/달러", "KRW=X", "fx"),
-            Item("원/엔(100엔)", "JPYKRW=X", "fx", 100),
-        ],
+    "kr_noon": {
+        "🇰🇷 국내 증시": _KR_INDICES,
+        "🌏 아시아 증시": _ASIA,
+        "💱 환율": [Item("원/달러", "KRW=X", "fx"), Item("원/엔(100엔)", "JPYKRW=X", "fx", 100)],
+    },
+    "kr_close": {
+        "🇰🇷 국내 증시": _KR_INDICES,
+        "💱 환율": [Item("원/달러", "KRW=X", "fx")],
+    },
+    "us_open": {
+        "🇺🇸 미국 증시": _US_INDICES,
+        "💱 원자재·금리·환율": _MACRO,
+    },
+    "us_close": {
+        "🇺🇸 미국 증시": _US_INDICES,
+        "💱 환율·원자재·금리": _MACRO,
     },
 }
 
-TITLES = {"morning": "🌅 아침 증시 브리핑", "close": "📊 장 마감 증시 리포트"}
-
-# 휴장일 판별 기준: 이 지표의 마지막 거래일이 기대한 날짜가 아니면 휴장으로 본다
-ANCHOR = {"morning": "^GSPC", "close": "^KS11"}
+# 대기 정책
+MAX_EARLY = 25 * 60  # 목표 시각보다 이만큼 이상 일찍 시작했으면 건너뜀 (서머타임 반대 시즌 cron 등)
+MAX_LATE = 45 * 60  # 목표 시각보다 이만큼 이상 늦게 시작했으면 건너뜀
 
 
 @dataclass
 class Quote:
     item: Item
     currency: str = ""
-    last_date: date | None = None  # 거래소 현지 기준 마지막 거래일
+    last_date: date | None = None  # 거래소 현지 기준 시세 날짜 (세션 날짜)
+    asof: datetime | None = None  # 시세 기준 시각 (UTC)
     price: float = 0.0
     change: float = 0.0
     change_pct: float = 0.0
@@ -112,7 +167,7 @@ class Quote:
     ma20: float | None = None
     ma60: float | None = None
     rsi14: float | None = None
-    vol_ratio: float | None = None  # 오늘 거래량 / 20일 평균
+    vol_ratio: float | None = None  # 오늘 거래량 / 20일 평균 (장 마감 후 에디션만)
     signals: list[str] = field(default_factory=list)
 
 
@@ -126,6 +181,35 @@ def parse_watchlist(spec: str | None = None) -> list[Item]:
         name, _, symbol = part.rpartition(":")
         out.append(Item((name or symbol).strip(), symbol.strip(), "stock"))
     return out
+
+
+def watchlist_for(edition: str, items: list[Item]) -> list[Item]:
+    """국장 에디션은 국내 종목(.KS/.KQ), 미장 에디션은 그 외(미국) 종목만."""
+    kr = SPECS[edition].market == "kr"
+    return [i for i in items if i.is_kr == kr]
+
+
+# ---------------- 시각 ----------------
+
+def target_time(edition: str, now: datetime) -> datetime:
+    """오늘(해당 시간대 기준)의 목표 시각. 미국 개장은 뉴욕 09:33 이라 서머타임이 자동 반영된다."""
+    spec = SPECS[edition]
+    d = now.astimezone(spec.tz).date()
+    return datetime(d.year, d.month, d.day, spec.hour, spec.minute, tzinfo=spec.tz)
+
+
+def wait_seconds(edition: str, now: datetime) -> float | None:
+    """목표 시각까지 기다릴 초. 너무 이르거나 너무 늦게 시작했으면 None (건너뜀)."""
+    delta = (target_time(edition, now) - now).total_seconds()
+    if delta > MAX_EARLY or delta < -MAX_LATE:
+        return None
+    return max(delta, 0.0)
+
+
+def expected_session(edition: str, now: datetime) -> date:
+    """지금 시각에 해당 시장의 '오늘/가장 최근' 세션 날짜 (거래소 현지 기준)."""
+    tz = NY if SPECS[edition].market == "us" else KST
+    return now.astimezone(tz).date()
 
 
 # ---------------- 수집 ----------------
@@ -172,25 +256,43 @@ def _rsi(closes: list[float], n: int = 14) -> float | None:
     return 100 - 100 / (1 + avg_g / avg_l)
 
 
-def analyze(item: Item, chart: dict) -> Quote:
+def analyze(item: Item, chart: dict, intraday: bool = False) -> Quote:
+    """차트 응답 → Quote.
+
+    현재가는 meta.regularMarketPrice(있으면), 전일 대비는 '세션 날짜 이전의 마지막 확정 종가' 기준으로
+    계산한다. 장중에 오늘 봉이 일봉 목록에 있든(종가 null 포함) 없든 같은 결과가 나온다.
+    """
     meta = chart.get("meta", {})
     q = (chart.get("indicators", {}).get("quote") or [{}])[0]
     offset = timedelta(seconds=meta.get("gmtoffset", 0))
     rows = [
-        (datetime.fromtimestamp(ts, timezone.utc) + offset, c, v)
+        (datetime.fromtimestamp(ts, timezone.utc) + offset, c * item.scale, v)
         for ts, c, v in zip(chart.get("timestamp") or [], q.get("close") or [], q.get("volume") or [])
         if c is not None
     ]
-    if len(rows) < 2:
+
+    asof = None
+    rt, rp = meta.get("regularMarketTime"), meta.get("regularMarketPrice")
+    if rt and rp is not None:
+        asof = datetime.fromtimestamp(rt, timezone.utc)
+        session_date = (asof + offset).date()
+        price = rp * item.scale
+    elif rows:
+        session_date, price = rows[-1][0].date(), rows[-1][1]
+    else:
+        raise ValueError(f"데이터 없음: {item.symbol}")
+
+    hist = [(d, c, v) for d, c, v in rows if d.date() < session_date]  # 확정된 이전 종가들
+    if not hist:
         raise ValueError(f"데이터 부족: {item.symbol}")
-    closes = [c * item.scale for _, c, _ in rows]
-    vols = [v or 0 for _, _, v in rows]
-    price, prev = closes[-1], closes[-2]
+    closes = [c for _, c, _ in hist] + [price]
+    prev = closes[-2]
 
     quote = Quote(
         item=item,
         currency=meta.get("currency", ""),
-        last_date=rows[-1][0].date(),
+        last_date=session_date,
+        asof=asof,
         price=price,
         change=price - prev,
         change_pct=_pct(price, prev),
@@ -202,9 +304,12 @@ def analyze(item: Item, chart: dict) -> Quote:
         ma60=sum(closes[-60:]) / 60 if len(closes) >= 60 else None,
         rsi14=_rsi(closes),
     )
-    past = [v for v in vols[-21:-1] if v]
-    if vols[-1] and len(past) >= 10:
-        quote.vol_ratio = vols[-1] / (sum(past) / len(past))
+
+    if not intraday:  # 장중 거래량은 하루치가 아니라서 배수 비교가 의미 없다
+        today_vol = rows[-1][2] if rows and rows[-1][0].date() == session_date else meta.get("regularMarketVolume")
+        past = [v for _, _, v in hist[-20:] if v]
+        if today_vol and len(past) >= 10:
+            quote.vol_ratio = today_vol / (sum(past) / len(past))
 
     s = quote.signals
     if len(closes) >= 120 and price >= quote.high_52w:
@@ -230,7 +335,9 @@ def analyze(item: Item, chart: dict) -> Quote:
 
 
 def collect(edition: str, watchlist: list[Item]) -> dict[str, list[Quote]]:
-    groups = {**MARKETS[edition], "⭐ 관심 종목": watchlist}
+    spec = SPECS[edition]
+    label = "국내" if spec.market == "kr" else "미국"
+    groups = {**MARKETS[edition], f"⭐ 관심 종목({label})": watchlist_for(edition, watchlist)}
     out: dict[str, list[Quote]] = {}
     session = requests.Session()
     try:
@@ -238,7 +345,7 @@ def collect(edition: str, watchlist: list[Item]) -> dict[str, list[Quote]]:
             out[title] = []
             for it in items:
                 try:
-                    out[title].append(analyze(it, fetch_chart(session, it.symbol)))
+                    out[title].append(analyze(it, fetch_chart(session, it.symbol), spec.intraday))
                 except (RuntimeError, ValueError, KeyError, TypeError) as exc:
                     log.error("시세 조회 실패 (%s %s): %s", it.name, it.symbol, exc)
                 time.sleep(0.3)
@@ -247,14 +354,29 @@ def collect(edition: str, watchlist: list[Item]) -> dict[str, list[Quote]]:
     return out
 
 
-def is_market_day(edition: str, day: date, quotes: dict[str, list[Quote]]) -> bool:
-    """morning: 미국장이 어제(현지) 열렸는지, close: 국내장이 오늘 열렸는지."""
-    expected = day - timedelta(days=1) if edition == "morning" else day
+def anchor_session(edition: str) -> date | None:
+    """기준 지표(코스피 / S&P500)의 최신 시세 날짜. 조회 실패면 None (판단 보류)."""
+    sym = ANCHOR[SPECS[edition].market]
+    session = requests.Session()
+    try:
+        q = analyze(Item(sym, sym, "index"), fetch_chart(session, sym), True)
+        log.info("기준 지표 %s 최신 시세: %s (기준 시각 %s)", sym, q.last_date, q.asof)
+        return q.last_date
+    except (RuntimeError, ValueError, KeyError, TypeError) as exc:
+        log.warning("기준 지표 조회 실패: %s", exc)
+        return None
+    finally:
+        session.close()
+
+
+def asof_label(edition: str, quotes: dict[str, list[Quote]]) -> str:
+    """'11/13 09:03 KST 기준' — 기준 지표의 시세 시각. 시세가 지연되면 여기서 보인다."""
+    sym = ANCHOR[SPECS[edition].market]
     for qs in quotes.values():
         for q in qs:
-            if q.item.symbol == ANCHOR[edition]:
-                return q.last_date == expected
-    return True  # 기준 지표를 못 가져오면 판단 보류 (그냥 보낸다)
+            if q.item.symbol == sym and q.asof:
+                return f"{q.asof.astimezone(KST):%m/%d %H:%M} KST 기준"
+    return ""
 
 
 # ---------------- 표시 ----------------
@@ -300,9 +422,14 @@ def _day_label(day: date) -> str:
 DISCLAIMER = "투자 판단의 참고 자료일 뿐 투자 권유가 아닙니다. 시세는 지연될 수 있습니다."
 
 
+def _subtitle(edition: str, day: date, quotes: dict[str, list[Quote]]) -> str:
+    asof = asof_label(edition, quotes)
+    return f"{_day_label(day)} · {asof}" if asof else _day_label(day)
+
+
 def render_markdown(edition: str, day: date, quotes: dict[str, list[Quote]],
                     comment: dict | None = None) -> str:
-    lines = [f"# {TITLES[edition]} — {_day_label(day)}", ""]
+    lines = [f"# {SPECS[edition].title} — {_subtitle(edition, day, quotes)}", ""]
     if comment and comment.get("headline"):
         lines += [f"> **{comment['headline']}**", ""]
     for title, qs in quotes.items():
@@ -334,7 +461,7 @@ def render_markdown(edition: str, day: date, quotes: dict[str, list[Quote]],
 def render_telegram(edition: str, day: date, quotes: dict[str, list[Quote]],
                     comment: dict | None = None) -> list[str]:
     e = html.escape
-    head = [f"<b>{e(TITLES[edition])}</b>", _day_label(day)]
+    head = [f"<b>{e(SPECS[edition].title)}</b>", _subtitle(edition, day, quotes)]
     if comment and comment.get("headline"):
         head += ["", f"<b>{e(comment['headline'])}</b>"]
     body = []
@@ -381,7 +508,8 @@ COMMENT_PROMPT = """\
 짧은 시장 코멘트를 씁니다.
 
 규칙:
-- headline: 오늘 시장을 한 문장(50자 이내)으로 요약합니다.
+- 이 리포트는 시점이 정해져 있습니다: {when}. 장이 끝나지 않았다면 '마감'이 아니라 '현재', '장 초반', '지금까지' 같은 표현을 씁니다.
+- headline: 지금 시장을 한 문장(50자 이내)으로 요약합니다.
 - points: 3~4개. 지수·업종·환율·금리 등 데이터에서 읽히는 흐름과 관심 종목의 눈에 띄는 움직임을 설명합니다.
   각 항목 한 문장, 90자 이내.
 - watch: 2~3개. {watch_hint}
@@ -389,11 +517,6 @@ COMMENT_PROMPT = """\
 - 입력에 없는 사실을 지어내지 않습니다. 매수/매도 추천이나 목표가는 쓰지 않습니다.
 - '~했다/~이다' 체로 간결하게 씁니다.
 """
-
-WATCH_HINT = {
-    "morning": "간밤 미국장과 환율을 바탕으로 오늘 국내장에서 지켜볼 점",
-    "close": "오늘 마감 흐름을 바탕으로 오늘 밤 미국장이나 내일 국내장에서 지켜볼 점",
-}
 
 COMMENT_SCHEMA = {
     "type": "object",
@@ -428,7 +551,8 @@ def market_comment(edition: str, quotes: dict[str, list[Quote]], headlines: list
 
     from .summarizer import _ask_json
 
-    system = COMMENT_PROMPT.format(watch_hint=WATCH_HINT[edition])
+    spec = SPECS[edition]
+    system = COMMENT_PROMPT.format(when=spec.when, watch_hint=spec.watch_hint)
     try:
         return _ask_json(anthropic.Anthropic(), system, COMMENT_SCHEMA,
                          _comment_input(quotes, headlines), "stock")
