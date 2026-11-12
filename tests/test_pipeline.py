@@ -191,3 +191,13 @@ def test_usage_recorded_and_priced():
     assert client2.get("/usage").status_code == 401
     body = client2.get("/usage?token=t").json()
     assert body["all_time"]["calls"] == 2 and body["today"]["input_tokens"] == 2000
+
+
+def test_followup_reply_without_keywords():
+    s, _, extractor = make([ExtractionResult(events=[]), ExtractionResult(events=[])])
+    s.handle_message(msg("오랜만이야", 1))
+    s.handle_message(msg("ㅇㅋ", 2))
+    assert extractor.calls == []
+    s.handle_message(msg("내일 7시 어때?", 3))
+    s.handle_message(msg("좋아!", 4))
+    assert len(extractor.calls) == 2

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Iterable, Sequence
 
 from .config import Settings
@@ -17,6 +17,8 @@ log = logging.getLogger(__name__)
 SOURCE_LABELS = {"kakao": "카카오톡", "daangn": "당근", "other": "메신저"}
 TENTATIVE_PREFIX = "[미정] "
 CANCELLED_PREFIX = "[취소] "
+FOLLOWUP_MINUTES = 60
+FOLLOWUP_MESSAGES = 5
 
 
 @dataclass
@@ -45,13 +47,25 @@ class Scheduler:
     def handle_message(self, msg: ChatMessage) -> ApplyReport:
         if not self.store.add_message(msg):
             return ApplyReport(skipped=["중복 메시지"])
-        if not looks_like_schedule(msg.text):
-            return ApplyReport()
         context = self.store.recent_messages(
             msg.source, msg.room, msg.timestamp,
             self.settings.context_messages, self.settings.context_hours,
         )
+        if not self._needs_extraction(msg, context):
+            return ApplyReport()
         return self._run(msg.source, msg.room, context)
+
+    def _needs_extraction(self, msg: ChatMessage, context: Sequence[ChatMessage]) -> bool:
+        """비용 절약: 약속과 관련 있어 보일 때만 Claude를 호출한다."""
+        if looks_like_schedule(msg.text):
+            return True
+        # 아직 미확정인 약속이 있으면 "좋아요" 같은 답장으로 확정될 수 있다
+        if any(e.status == "tentative" for e in self.store.active_events(msg.source, msg.room)):
+            return True
+        # 약속 단어가 없는 답장도 직전 대화가 약속 이야기였다면 보낸다
+        since = msg.timestamp - timedelta(minutes=FOLLOWUP_MINUTES)
+        return any(m.timestamp >= since and looks_like_schedule(m.text)
+                   for m in context[-FOLLOWUP_MESSAGES - 1:-1])
 
     # ---- 내보내기 파일 일괄 처리 ----
     def import_messages(
