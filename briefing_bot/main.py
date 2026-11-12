@@ -1,10 +1,11 @@
 """데일리 브리핑 봇 진입점.
 
 하루 일정 (KST):
-    07시  weather                    오늘의 날씨
+    07:30 weather --edition morning  오늘의 날씨
     08시  news --edition morning     1차 뉴스 브리핑
     12시  news --edition noon        2차 뉴스 브리핑
     16시  news --edition afternoon   3차 뉴스 브리핑
+    17시  weather --edition evening  저녁 날씨 & 내일 예보
     22시  news --edition evening     하루 마무리 뉴스 브리핑
 
 사용 예:
@@ -55,7 +56,6 @@ EDITIONS: dict[str, Edition] = {
     ]
 }
 
-WEATHER_HOUR = 7
 URL_RE = re.compile(r"\((https://news\.nate\.com/view/[^)\s]+)\)")
 
 
@@ -82,14 +82,23 @@ def _send(markdown: str, telegram: list[str], no_send: bool) -> None:
 
 # ---------------- 날씨 ----------------
 
+def _already_sent(path: Path, force: bool) -> bool:
+    """같은 날 같은 브리핑이 이미 나갔으면 True (예약 실행 지연 + 수동 실행 중복 방지)."""
+    if path.exists() and not force:
+        logging.info("이미 보낸 브리핑이라 건너뜁니다: %s (다시 보내려면 --force)", path)
+        return True
+    return False
+
+
 def run_weather(args: argparse.Namespace) -> int:
+    day = now_kst().date()
+    out_path = Path(args.out_dir) / f"{day:%Y-%m-%d}" / f"weather-{args.edition}.md"
+    if _already_sent(out_path, args.force):
+        return 0
     if not check_secrets(False, not args.no_send):
         return 1
-    day = now_kst().date()
-    markdown, telegram = weather.build(day)
-    if summary_file := os.environ.get("GITHUB_STEP_SUMMARY"):
-        with open(summary_file, "a", encoding="utf-8") as f:
-            f.write(markdown)
+    markdown, telegram = weather.build(day, args.edition)
+    _write_outputs(out_path, markdown)
     _send(markdown, telegram, args.no_send)
     return 0
 
@@ -127,11 +136,13 @@ def check_secrets(need_claude: bool, need_telegram: bool) -> bool:
 
 
 def run_news(args: argparse.Namespace) -> int:
-    if not check_secrets(not args.no_summary, not args.no_send):
-        return 1
     edition = EDITIONS[args.edition]
     today = now_kst().date()
     day = datetime.strptime(args.date, "%Y%m%d").date() if args.date else today
+    if _already_sent(Path(args.out_dir) / f"{day:%Y-%m-%d}" / f"{edition.order}-{edition.key}.md", args.force):
+        return 0
+    if not check_secrets(not args.no_summary, not args.no_send):
+        return 1
 
     codes = [c.strip() for c in args.sections.split(",") if c.strip()]
     unknown = [c for c in codes if c not in scraper.SECTIONS]
@@ -190,14 +201,17 @@ def run_news(args: argparse.Namespace) -> int:
 
 # ---------------- 자동 선택 ----------------
 
-def pick_task(now: datetime) -> tuple[str, str | None]:
+WEATHER_TIMES = {"morning": (7, 30), "evening": (17, 0)}
+
+
+def pick_task(now: datetime) -> tuple[str, str]:
     """현재 시각에서 가장 가까운 예정 작업을 고른다 (스케줄러 지연 ±90분 허용)."""
-    slots = [("weather", None, WEATHER_HOUR)] + [
-        ("news", e.key, e.hour) for e in EDITIONS.values()
+    slots = [("weather", k, h * 60 + m) for k, (h, m) in WEATHER_TIMES.items()] + [
+        ("news", e.key, e.hour * 60) for e in EDITIONS.values()
     ]
     minutes = now.hour * 60 + now.minute
-    best = min(slots, key=lambda s: abs(s[2] * 60 - minutes))
-    if abs(best[2] * 60 - minutes) > 90:
+    best = min(slots, key=lambda s: abs(s[2] - minutes))
+    if abs(best[2] - minutes) > 90:
         raise SystemExit(f"{now:%H:%M} 근처에 예정된 작업이 없습니다")
     return best[0], best[1]
 
@@ -208,8 +222,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--no-send", action="store_true", help="메신저 전송 없이 출력만")
+    common.add_argument("--force", action="store_true", help="이미 보낸 브리핑이어도 다시 보냄")
+    common.add_argument("--out-dir", default=os.environ.get("BRIEFING_OUT_DIR", "briefings"))
 
-    sub.add_parser("weather", parents=[common], help="오늘의 날씨")
+    wx = sub.add_parser("weather", parents=[common], help="날씨 (morning: 07:30 오늘 날씨, evening: 17시 저녁·내일 날씨)")
+    wx.add_argument("--edition", choices=list(WEATHER_TIMES), default="morning")
 
     news = sub.add_parser("news", parents=[common], help="뉴스 브리핑")
     news.add_argument("--edition", choices=list(EDITIONS), default="morning")
@@ -220,7 +237,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help=f"분야 코드 쉼표 구분. 가능: {','.join(f'{k}({v})' for k, v in scraper.SECTIONS.items())}",
     )
     news.add_argument("--top", type=int, default=int(os.environ.get("TOP_N", 10)))
-    news.add_argument("--out-dir", default=os.environ.get("BRIEFING_OUT_DIR", "briefings"))
     news.add_argument("--no-summary", action="store_true", help="Claude 요약 없이 제목만")
 
     sub.add_parser("auto", parents=[common], help="현재 시각에 맞는 작업 자동 실행")

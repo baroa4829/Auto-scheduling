@@ -59,10 +59,10 @@ def test_ranking_split_blocks(monkeypatch):
     assert [a.title for a in arts][-1] == "기사 제목 번호 10" and len(arts) == 10
 
 
-def test_missing_secrets(monkeypatch, caplog):
+def test_missing_secrets(monkeypatch, caplog, tmp_path):
     for k in ("ANTHROPIC_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"):
         monkeypatch.delenv(k, raising=False)
-    assert main.main(["news"]) == 1
+    assert main.main(["news", "--out-dir", str(tmp_path)]) == 1
     assert "ANTHROPIC_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID" in caplog.text
 
 
@@ -133,7 +133,7 @@ def test_weather_analyze_and_render():
     r = weather.analyze(weather.Location("서울", 37.5, 127.0), FAKE_WEATHER)
     assert (r["tmin"], r["tmax"], r["rain_prob"]) == (1, 12, 70)
     assert r["pm10_grade"] == "나쁨" and r["pm25_grade"] == "보통"
-    assert set(r["slots"]) == {"아침", "낮", "저녁"}
+    assert set(r["slots"]) == {"아침", "낮", "저녁", "밤"}
     assert r["slots"]["저녁"]["rain"] == 70
     tips = " ".join(r["tips"])
     assert "우산" in tips and "일교차" in tips and "마스크" in tips
@@ -142,6 +142,32 @@ def test_weather_analyze_and_render():
     assert "## 서울 🌧️ 약한 비" in md and "최저 1°C / 최고 12°C" in md
     tg = weather.render_telegram(date(2026, 11, 12), [r])
     assert len(tg) == 1 and "오늘의 날씨 · 서울" in tg[0]
+
+
+def test_weather_evening_edition():
+    import copy
+    data = copy.deepcopy(FAKE_WEATHER)
+    d = data["forecast"]["daily"]
+    d["weather_code"].append(3)
+    d["temperature_2m_max"].append(10.0)
+    d["temperature_2m_min"].append(-4.0)
+    d["precipitation_probability_max"].append(60)
+    r = weather.analyze(weather.Location("동탄", 37.1, 127.1), data)
+    assert r["tomorrow"] == {"code": 3, "tmax": 10, "tmin": -4, "rain_prob": 60}
+    md = weather.render_markdown(date(2026, 11, 13), [r], edition="evening")
+    assert "저녁 날씨 & 내일 예보" in md and "내일 ☁️ 흐림 최저 -4°C" in md
+    assert "아침 " not in md and "밤 " in md
+    assert "내일 비 소식" in md and "5도 더 추워요" in md
+    tg = weather.render_telegram(date(2026, 11, 13), [r], edition="evening")
+    assert "🌆 <b>저녁 날씨" in tg[0] and "<b>내일</b>" in tg[0]
+
+
+def test_weather_multi_location_single_message():
+    r1 = weather.analyze(weather.Location("동탄9동", 37.1, 127.1), FAKE_WEATHER)
+    r2 = weather.analyze(weather.Location("반월동", 37.2, 127.0), FAKE_WEATHER)
+    tg = weather.render_telegram(date(2026, 11, 13), [r1, r2])
+    assert len(tg) == 1 and "동탄9동" in tg[0] and "반월동" in tg[0]
+    assert [l.name for l in weather.parse_locations(weather.DEFAULT_LOCATIONS)] == ["화성 동탄9동", "화성 반월동"]
 
 
 def test_parse_locations():
@@ -153,7 +179,8 @@ def test_parse_locations():
 
 def test_pick_task():
     kst = main.KST
-    assert main.pick_task(datetime(2026, 11, 12, 6, 55, tzinfo=kst)) == ("weather", None)
+    assert main.pick_task(datetime(2026, 11, 12, 7, 25, tzinfo=kst)) == ("weather", "morning")
+    assert main.pick_task(datetime(2026, 11, 12, 17, 5, tzinfo=kst)) == ("weather", "evening")
     assert main.pick_task(datetime(2026, 11, 12, 8, 10, tzinfo=kst)) == ("news", "morning")
     assert main.pick_task(datetime(2026, 11, 12, 11, 50, tzinfo=kst)) == ("news", "noon")
     assert main.pick_task(datetime(2026, 11, 12, 16, 5, tzinfo=kst)) == ("news", "afternoon")
@@ -243,3 +270,20 @@ def test_fetch_bodies_stops_after_consecutive_failures(monkeypatch):
     arts = {"정치": [scraper.Article(i, f"t{i}", f"u{i}") for i in range(1, 11)]}
     scraper.fetch_bodies(None, arts)
     assert calls == [1, 2, 3]
+
+
+def test_skip_already_sent(monkeypatch, tmp_path):
+    """예약 실행이 늦게 와서 수동 실행과 겹쳐도 같은 브리핑은 한 번만 보낸다."""
+    monkeypatch.setattr(main, "now_kst", lambda: datetime(2026, 11, 13, 7, 30, tzinfo=main.KST))
+    for k in ("ANTHROPIC_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"):
+        monkeypatch.setenv(k, "x")
+    monkeypatch.setattr(weather, "build", lambda day, edition="morning": ("# md\n", ["tg"]))
+    sent = []
+    monkeypatch.setattr(notifier, "dispatch", lambda md, tg: sent.append(md) or ["telegram"])
+    args = ["weather", "--out-dir", str(tmp_path)]
+    assert main.main(args) == 0
+    assert main.main(args) == 0  # 두 번째는 건너뜀
+    assert len(sent) == 1
+    assert main.main(args + ["--force"]) == 0
+    assert len(sent) == 2
+    assert (tmp_path / "2026-11-13" / "weather-morning.md").exists()
