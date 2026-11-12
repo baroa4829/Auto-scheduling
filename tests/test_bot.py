@@ -206,6 +206,7 @@ def test_news_editions_mark_new_and_fallback(monkeypatch, tmp_path):
 
 
 def test_telegram_check(monkeypatch, caplog):
+    caplog.set_level("INFO")
     class R:
         def __init__(self, data):
             self._d, self.ok, self.status_code, self.text = data, True, 200, ""
