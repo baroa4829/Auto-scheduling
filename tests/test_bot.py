@@ -218,14 +218,14 @@ def test_news_editions_mark_new_and_fallback(monkeypatch, tmp_path):
     assert calls == [today, date(2026, 11, 11)]
     assert "어제(11/11) 랭킹을 사용" in sent[-1] and "🆕" not in sent[-1]
 
-    # 12시: 오늘 랭킹 정상(어제보다 많음), 1차와 다른 기사는 모두 🆕
+    # 12시: 오늘 랭킹 정상(어제보다 많음), 1차에 나온 기사(Y1)는 빠진다
     state["thin"] = False
     state["titles"] = ["Y1", "A", "B", "C", "D", "E", "F"]
     calls.clear()
     assert main.main(["news", "--edition", "noon", "--sections", "pol", "--out-dir", str(tmp_path)]) == 0
     md = sent[-1]
     assert "☀️ 2차 뉴스 브리핑" in md
-    assert "view/Y1)** 🆕" not in md and "view/A)** 🆕" in md
+    assert "view/Y1)" not in md and "view/A)" in md and "🆕" not in md
 
     # 22시: 하루 정리 포함
     assert main.main(["news", "--edition", "evening", "--sections", "pol", "--out-dir", str(tmp_path)]) == 0
@@ -287,3 +287,36 @@ def test_skip_already_sent(monkeypatch, tmp_path):
     assert main.main(args + ["--force"]) == 0
     assert len(sent) == 2
     assert (tmp_path / "2026-11-13" / "weather-morning.md").exists()
+
+
+def test_dedupe_filters_previous_and_similar(tmp_path):
+    from briefing_bot import dedupe
+
+    day_dir = tmp_path / "2026-11-13"
+    day_dir.mkdir()
+    (day_dir / "1-morning.md").write_text(
+        "1. **[[속보] 젠슨 황, 엔비디아 부사장과도 불륜 의혹](https://news.nate.com/view/1)** _(A)_\n"
+        "2. **[환율 1450원 돌파](https://news.nate.com/view/2)**\n",
+        encoding="utf-8",
+    )
+    prev = dedupe.previous_articles(day_dir, ["1-morning.md", "2-noon.md"])
+    assert len(prev) == 2
+
+    A = scraper.Article
+    collected = {
+        "세계": [
+            A(1, "젠슨 황, 엔비디아 부사장과도 불륜 의혹(종합)", "https://news.nate.com/view/9"),  # 비슷한 제목
+            A(2, "환율 1450원 돌파", "https://news.nate.com/view/2"),  # 같은 URL
+            A(3, "미 연준 금리 동결 결정", "https://news.nate.com/view/3"),
+            A(4, "유럽 증시 일제히 하락", "https://news.nate.com/view/4"),
+        ],
+        "경제": [
+            A(1, "미 연준, 금리 동결 결정", "https://news.nate.com/view/5"),  # 다른 분야와 겹침
+            A(2, "반도체 수출 역대 최대", "https://news.nate.com/view/6"),
+        ],
+    }
+    out, dropped = dedupe.filter_new(collected, prev, top_n=1)
+    assert [a.rank for a in out["세계"]] == [3]  # 원래 순위 유지, top_n 개만
+    assert [a.title for a in out["경제"]] == ["반도체 수출 역대 최대"]
+    assert dropped == 3
+    assert not dedupe.similar("삼성전자 주가 3% 상승 마감", "삼성전자 주가 5% 하락 마감")
