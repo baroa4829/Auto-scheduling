@@ -13,12 +13,15 @@ on:
     - cron: "50 12 * * *"   # 22시 하루 마무리 브리핑  (21:50 KST)
     - cron: "20 23 * * 1-5" # 08:30 아침 증시 브리핑   (08:20 KST 화~토, 간밤 미국장 정리)
     - cron: "0 7 * * 1-5"   # 16:10 장 마감 증시 리포트 (16:00 KST 월~금)
+    - cron: "15 11 * * *"   # 20:30 가족 일정 알림     (20:15 KST)
+    - cron: "40 8 * * 5"    # 금 18시 주말 나들이 추천 (17:40 KST)
+    - cron: "40 9 * * 0"    # 일 19시 이번 주 학습지   (18:40 KST)
   workflow_dispatch:
     inputs:
       task:
         description: "실행할 작업"
         type: choice
-        options: [weather-morning, weather-evening, morning, noon, afternoon, evening, stock-morning, stock-close, telegram-check]
+        options: [weather-morning, weather-evening, morning, noon, afternoon, evening, stock-morning, stock-close, family-daily, family-weekend, family-study, telegram-check]
         default: weather-morning
       sections:
         description: "뉴스 분야 코드 (pol,eco,soc,int,its,ent,spo), 비우면 기본값"
@@ -51,6 +54,9 @@ jobs:
             "50 12 * * *") task=evening ;;
             "20 23 * * 1-5") task=stock-morning ;;
             "0 7 * * 1-5")  task=stock-close ;;
+            "15 11 * * *")  task=family-daily ;;
+            "40 8 * * 5")   task=family-weekend ;;
+            "40 9 * * 0")   task=family-study ;;
             *)             task="$INPUT_TASK" ;;
           esac
           echo "task=$task" >> "$GITHUB_OUTPUT"
@@ -75,6 +81,14 @@ jobs:
           NATE_SECTIONS: ${{ inputs.sections || vars.NATE_SECTIONS }}
           WEATHER_LOCATIONS: ${{ vars.WEATHER_LOCATIONS }}
           STOCK_WATCHLIST: ${{ vars.STOCK_WATCHLIST }}
+          # 가족 알림: 일정은 Secret 에서만 읽고, 결과는 텔레그램으로만 보낸다 (공개 저장소)
+          FAMILY_ICS_URLS: ${{ secrets.FAMILY_ICS_URLS }}
+          FAMILY_MOVE_DATE: ${{ vars.FAMILY_MOVE_DATE }}
+          FAMILY_KIDS: ${{ vars.FAMILY_KIDS }}
+          FAMILY_HOME: ${{ vars.FAMILY_HOME }}
+          APPLIANCE_WATCHLIST: ${{ vars.APPLIANCE_WATCHLIST }}
+          NAVER_CLIENT_ID: ${{ secrets.NAVER_CLIENT_ID }}
+          NAVER_CLIENT_SECRET: ${{ secrets.NAVER_CLIENT_SECRET }}
         run: |
           # 수동 실행은 이미 보낸 브리핑이어도 다시 보낸다
           FORCE=""
@@ -84,6 +98,8 @@ jobs:
               python -m briefing_bot.main weather --edition "${TASK#weather-}" $FORCE ;;
             stock-morning|stock-close)
               python -m briefing_bot.main stock --edition "${TASK#stock-}" $FORCE ;;
+            family-*)
+              python -m briefing_bot.main family --edition "${TASK#family-}" ;;
             telegram-check)
               python -m briefing_bot.main telegram-check ;;
             *)
@@ -91,7 +107,7 @@ jobs:
           esac
 
       - name: Commit briefing archive
-        if: steps.pick.outputs.task != 'telegram-check'
+        if: steps.pick.outputs.task != 'telegram-check' && !startsWith(steps.pick.outputs.task, 'family-')
         env:
           TASK: ${{ steps.pick.outputs.task }}
         run: |

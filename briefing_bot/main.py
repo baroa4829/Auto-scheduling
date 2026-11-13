@@ -18,6 +18,11 @@
     python -m briefing_bot.main news --edition evening --sections pol,eco --no-send
     python -m briefing_bot.main stock --edition close --no-send
     python -m briefing_bot.main auto            # 현재 KST 시각에 맞는 작업 실행
+
+가족 알림 (텔레그램으로만 보내고 저장소에는 남기지 않음 — 공개 저장소이므로):
+    20:30 family --edition daily     내일 가족 일정, 이사 D-day, 공정 체크, 결제·행사 예고, 가전 최저가
+    금 18시 family --edition weekend  주말 나들이 추천
+    일 19시 family --edition study    이번 주 학습지
 """
 
 from __future__ import annotations
@@ -33,7 +38,7 @@ from pathlib import Path
 
 import requests
 
-from . import notifier, scraper, stocks, summarizer, weather
+from . import family, kids, notifier, scraper, stocks, summarizer, weather
 
 KST = timezone(timedelta(hours=9))
 
@@ -134,6 +139,36 @@ def run_stock(args: argparse.Namespace) -> int:
     telegram = stocks.render_telegram(args.edition, day, quotes, comment)
     _write_outputs(out_path, markdown)
     _send(markdown, telegram, args.no_send)
+    return 0
+
+
+# ---------------- 가족 ----------------
+
+def run_family(args: argparse.Namespace) -> int:
+    """가족 정보는 공개 저장소에 남기지 않는다: 파일 저장·Step Summary·로그 출력 없음."""
+    today = now_kst().date()
+    need_claude = args.edition in ("weekend", "study")
+    if not check_secrets(need_claude, not args.no_send):
+        return 1
+    if args.edition == "daily":
+        if not os.environ.get("FAMILY_ICS_URLS"):
+            logging.error("FAMILY_ICS_URLS Secret 이 비어 있습니다 (Google 캘린더 iCal 비공개 주소)")
+            return 1
+        msg = family.build_daily(today)
+        if msg is None:
+            logging.info("내일 알릴 가족 일정이 없어 보내지 않습니다")
+            return 0
+        messages = [msg]
+    elif args.edition == "weekend":
+        messages = [kids.build_weekend(today)]
+    else:
+        messages = kids.build_study(today)
+
+    if args.no_send:
+        print("\n\n".join(messages))
+        return 0
+    notifier.dispatch("", messages)
+    logging.info("가족 알림 전송 완료 (%s, %d개 메시지)", args.edition, len(messages))
     return 0
 
 
@@ -279,6 +314,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     st.add_argument("--watchlist", help="관심 종목 '이름:심볼,...' (기본: STOCK_WATCHLIST 변수)")
     st.add_argument("--no-summary", action="store_true", help="Claude 시장 코멘트 없이 시세만")
 
+    fam = sub.add_parser("family", parents=[common], help="가족 알림 (daily: 매일 저녁, weekend: 주말 나들이, study: 학습지)")
+    fam.add_argument("--edition", choices=["daily", "weekend", "study"], default="daily")
+
     sub.add_parser("auto", parents=[common], help="현재 시각에 맞는 작업 자동 실행")
     sub.add_parser("telegram-check", help="텔레그램 봇 토큰/채팅 ID 설정 진단")
     return p.parse_args(argv)
@@ -305,6 +343,8 @@ def main(argv: list[str] | None = None) -> int:
         return run_weather(args)
     if args.cmd == "stock":
         return run_stock(args)
+    if args.cmd == "family":
+        return run_family(args)
     return run_news(args)
 
 
