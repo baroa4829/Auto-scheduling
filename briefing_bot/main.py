@@ -12,11 +12,16 @@
     08:30 stock --edition morning    간밤 미국 증시 + 환율·원자재 + 관심 종목 (화~토)
     16:10 stock --edition close      국내 증시 마감 + 아시아 + 관심 종목 (월~금)
 
+이사 알림 (KST, MOVING_PLAN 이 있을 때만):
+    07:25 move --edition daily       이사 D-day·오늘/내일 일정·결제·할 일·이사날 날씨
+    일 20시 move --edition weekly    부부 공유 주간 리포트 (앞으로 2주 일정·결제·할 일)
+
 사용 예:
     python -m briefing_bot.main weather
     python -m briefing_bot.main news --edition noon
     python -m briefing_bot.main news --edition evening --sections pol,eco --no-send
     python -m briefing_bot.main stock --edition close --no-send
+    python -m briefing_bot.main move --edition weekly --no-send
     python -m briefing_bot.main auto            # 현재 KST 시각에 맞는 작업 실행
 """
 
@@ -33,7 +38,7 @@ from pathlib import Path
 
 import requests
 
-from . import notifier, scraper, stocks, summarizer, weather
+from . import moving, notifier, scraper, stocks, summarizer, weather
 
 KST = timezone(timedelta(hours=9))
 
@@ -134,6 +139,47 @@ def run_stock(args: argparse.Namespace) -> int:
     telegram = stocks.render_telegram(args.edition, day, quotes, comment)
     _write_outputs(out_path, markdown)
     _send(markdown, telegram, args.no_send)
+    return 0
+
+
+# ---------------- 이사 ----------------
+
+def run_move(args: argparse.Namespace) -> int:
+    """이사 알림. 가족 일정이 공개 저장소에 남지 않도록 아카이브·Step Summary 를 쓰지 않는다."""
+    day = datetime.strptime(args.date, "%Y-%m-%d").date() if args.date else now_kst().date()
+    try:
+        plan = moving.load_plan()
+    except ValueError as exc:
+        logging.error("%s", exc)
+        return 1
+    if plan is None:
+        logging.info("MOVING_PLAN 이 없어 이사 알림을 건너뜁니다")
+        return 0
+
+    if args.edition == "weekly":
+        msgs = moving.build_weekly(plan, day)
+    else:
+        # 날씨 예보는 실제 오늘·내일만 있으므로 --date 미리보기에서는 붙이지 않는다
+        msgs = moving.build_daily(plan, day, with_weather=not (args.no_weather or args.date))
+    if not msgs and args.force and plan.active(day):
+        msgs = [f"🏠 {plan.title} {moving.fmt_dday(plan.dday(day))} — 오늘은 알릴 일정이 없습니다"]
+    if not msgs:
+        logging.info("이사 알림: 보낼 내용이 없습니다 (%s, 알림 기간 %s~%s)", day, plan.start_date, plan.end_date)
+        return 0
+
+    if args.no_send:
+        print("\n\n".join(msgs))
+        return 0
+    token = (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
+    ids = moving.chat_ids()
+    if not (token and ids):
+        logging.error("TELEGRAM_BOT_TOKEN 과 TELEGRAM_CHAT_ID(또는 MOVE_TELEGRAM_CHAT_ID) 가 필요합니다")
+        return 1
+    failed = [i for i, cid in enumerate(ids, 1) if not notifier.send_telegram(token, cid, msgs)]
+    if failed:
+        logging.error("이사 알림 전송 실패: %d번째 채팅", failed[0])
+        return 1
+    logging.info("이사 알림 전송 완료 (%s, 채팅 %d곳)", args.edition, len(ids))
     return 0
 
 
@@ -279,6 +325,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     st.add_argument("--watchlist", help="관심 종목 '이름:심볼,...' (기본: STOCK_WATCHLIST 변수)")
     st.add_argument("--no-summary", action="store_true", help="Claude 시장 코멘트 없이 시세만")
 
+    mv = sub.add_parser("move", parents=[common], help="이사 알림 (daily: D-day·결제·할 일, weekly: 부부 주간 리포트)")
+    mv.add_argument("--edition", choices=["daily", "weekly"], default="daily")
+    mv.add_argument("--date", help="기준일 YYYY-MM-DD (기본: 오늘 KST, 미리보기용)")
+    mv.add_argument("--no-weather", action="store_true", help="이사날 날씨 조회 생략")
+
     sub.add_parser("auto", parents=[common], help="현재 시각에 맞는 작업 자동 실행")
     sub.add_parser("telegram-check", help="텔레그램 봇 토큰/채팅 ID 설정 진단")
     return p.parse_args(argv)
@@ -305,6 +356,8 @@ def main(argv: list[str] | None = None) -> int:
         return run_weather(args)
     if args.cmd == "stock":
         return run_stock(args)
+    if args.cmd == "move":
+        return run_move(args)
     return run_news(args)
 
 

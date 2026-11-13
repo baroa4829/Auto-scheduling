@@ -407,3 +407,92 @@ def test_fmt_change_arrows():
     assert stocks.fmt_change(up) == "🔺1.00%"
     assert stocks.fmt_change(down) == "🔽1.00%"
     assert stocks.fmt_change(flat) == "➖0.00%"
+
+
+# ---------------- 이사 알림 ----------------
+
+from briefing_bot import moving
+
+PLAN = {
+    "title": "새집 이사",
+    "move_date": "2027-02-11",
+    "start_date": "2026-12-01",
+    "events": [
+        {"date": "2026-12-29", "title": "인테리어 착수금", "amount": 26000000},
+        {"date": "2027-02-10", "title": "가전 배송", "who": "아내"},
+        {"date": "2027-02-11", "title": "이사", "weather": True},
+    ],
+    "checklist": [
+        {"due": "D-30", "task": "인터넷 이전 예약", "who": "아내"},
+        {"due": "2026-12-15", "task": "보관이사 계약", "who": "남편"},
+        {"due": "D+3", "task": "전입신고"},
+        {"due": "D-40", "task": "다 한 일", "done": True},
+    ],
+}
+
+
+def test_moving_parse_and_format():
+    plan = moving.parse_plan(PLAN)
+    assert moving.parse_due("D-30", plan.move_date) == date(2027, 1, 12)
+    assert moving.parse_due("D+3", plan.move_date) == date(2027, 2, 14)
+    assert moving.parse_due("2026-12-15", plan.move_date) == date(2026, 12, 15)
+    assert plan.end_date == date(2027, 2, 25)
+    assert moving.fmt_amount(26000000) == "2,600만원"
+    assert moving.fmt_amount(12345) == "12,345원"
+    assert [moving.fmt_dday(n) for n in (3, 0, -2)] == ["D-3", "D-DAY", "D+2"]
+
+
+def test_moving_daily_payment_and_overdue():
+    plan = moving.parse_plan(PLAN)
+    msg = moving.build_daily(plan, date(2026, 12, 28), with_weather=False)[0]
+    assert "D-45" in msg and "내일 결제 준비" in msg and "2,600만원" in msg
+    assert "보관이사 계약" in msg  # 기한 지남
+    assert "다 한 일" not in msg
+    # 일정·할 일·마일스톤이 없는 날은 보내지 않는다
+    assert moving.build_daily(plan, date(2026, 12, 5), with_weather=False) is None
+    # 알림 기간 밖
+    assert moving.build_daily(plan, date(2026, 11, 20), with_weather=False) is None
+    assert moving.build_daily(plan, date(2027, 3, 1), with_weather=False) is None
+
+
+def test_moving_daily_weather_on_move_eve(monkeypatch):
+    plan = moving.parse_plan(PLAN)
+    monkeypatch.setattr(moving.weather, "fetch", lambda loc: {})
+    monkeypatch.setattr(moving.weather, "analyze", lambda loc, data: {
+        "day_code": 0, "tmin": -8, "tmax": 1, "rain_prob": 10,
+        "tomorrow": {"code": 71, "tmin": -9, "tmax": 0, "rain_prob": 70},
+    })
+    msg = moving.build_daily(plan, date(2027, 2, 10))[0]
+    assert "가전 배송" in msg and "내일 일정" in msg
+    assert "내일" in msg and "강수확률 70%" in msg and "방수" in msg and "동파" in msg
+
+
+def test_moving_weekly():
+    plan = moving.parse_plan(PLAN)
+    msg = moving.build_weekly(plan, date(2027, 1, 31))[0]
+    assert "주간 리포트" in msg and "D-11" in msg and "1/4 완료" in msg
+    assert "2/10(수) [아내] 가전 배송" in msg
+    assert "인터넷 이전 예약" in msg  # 기한 지남
+
+
+def test_run_move_sends_to_couple_chats(monkeypatch, tmp_path, caplog):
+    monkeypatch.setattr(main, "now_kst", lambda: datetime(2026, 12, 28, 7, 25, tzinfo=main.KST))
+    monkeypatch.setenv("MOVING_PLAN", json.dumps(PLAN))
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "t")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "111")
+    monkeypatch.setenv("MOVE_TELEGRAM_CHAT_ID", "222, -333")
+    sent = []
+    monkeypatch.setattr(notifier, "send_telegram", lambda tok, cid, msgs: sent.append(cid) or True)
+    assert main.main(["move", "--out-dir", str(tmp_path)]) == 0
+    assert sent == ["222", "-333"]
+    assert not any(tmp_path.iterdir())  # 공개 저장소에 아카이브를 남기지 않는다
+
+    # 계획이 없으면 조용히 건너뛴다
+    monkeypatch.delenv("MOVING_PLAN")
+    monkeypatch.setenv("MOVING_PLAN_FILE", str(tmp_path / "none.json"))
+    assert main.main(["move"]) == 0
+
+    # 형식 오류는 내용 없이 실패만 알린다
+    monkeypatch.setenv("MOVING_PLAN", '{"move_date": "비밀 내용"}')
+    assert main.main(["move"]) == 1
+    assert "비밀 내용" not in caplog.text

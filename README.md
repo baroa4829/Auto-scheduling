@@ -47,6 +47,37 @@
 - 코스피 종목은 `6자리코드.KS`, 코스닥 종목은 `6자리코드.KQ`, 미국 종목은 티커(`NVDA`) 그대로 씁니다.
 - 비워 두면 기본값(삼성전자·SK하이닉스·현대차, 국내 ETF 4종, 미국 종목 15종(스페이스X, 엔비디아, 팔란티어, 테슬라 등))을 씁니다.
 
+### 🏠 이사 알림 (계획을 등록했을 때만)
+
+| 시각 (KST) | 내용 | 명령 |
+|------|------|------|
+| 07:25 매일 | 이사 D-day, 오늘·내일 일정, 💳 결제 전날·당일 알림(금액·합계), 오늘까지 할 일, 기한 지난 할 일, 이사날 날씨 | `move --edition daily` |
+| 일 20:00 | 📋 부부 공유 주간 리포트: 앞으로 2주 일정, 결제 예정 합계, 담당자별 할 일, 진행률 | `move --edition weekly` |
+
+- 매일 알림은 그날 알릴 게 있을 때만 갑니다. 일정, 할 일, 기한 지난 할 일이 있거나 D-60/30/14/7/3/2/1/D-DAY일 때입니다.
+- `"weather": true`인 일정(이사, 짐 빼기 등)은 전날과 당일에 날씨를 붙입니다. 비·눈이 오면 방수 포장, 영하 5도 이하면 동파 주의 팁도 함께 보냅니다.
+- 알림 기간은 `start_date`(없으면 이사 60일 전)부터 이사 후 `end_after_days`(기본 14일)까지입니다.
+
+**⚠️ 이 저장소는 공개 저장소입니다.** 가족 일정과 금액이 담긴 계획 파일은 커밋하지 마세요.
+이사 알림은 `briefings/`에 아카이브하지 않고, Actions 로그에도 내용을 남기지 않습니다.
+
+**설정 방법**
+
+1. `moving_plan.example.json`을 참고해 계획 JSON을 만듭니다.
+   - `events`: 날짜가 정해진 일정. `amount`(원 단위)를 적으면 결제 일정으로 알립니다.
+   - `checklist`: 할 일. `due`는 `"D-30"`, `"D+3"`, `"2027-01-12"` 중 하나로 씁니다. 끝낸 일은 `"done": true`로 바꿉니다.
+   - `who`(담당), `note`(메모), `location`(날씨 지역 `이름:위도:경도`, 비우면 `WEATHER_LOCATIONS`의 첫 지역)은 선택입니다.
+2. 저장소 Settings → Secrets and variables → Actions → **Variables** 탭에서 `MOVING_PLAN`을 만들고 JSON 전체를 붙여넣습니다.
+   Variables는 공개되지 않고, 나중에 열어서 고칠 수 있습니다. 더 숨기고 싶으면 같은 이름의 Secret으로 넣어도 됩니다(그 대신 다시 볼 수 없음).
+3. (선택) 부부가 함께 받으려면 텔레그램 그룹을 만들어 봇을 초대하고, 그룹에서 아무 메시지나 보낸 뒤 `getUpdates`에서
+   그룹 채팅 ID(`-`로 시작)를 찾아 **Secret** `MOVE_TELEGRAM_CHAT_ID`로 등록합니다. 쉼표로 여러 개를 넣을 수 있습니다.
+   비워 두면 `TELEGRAM_CHAT_ID`로 보냅니다.
+4. Actions → Daily Briefing → Run workflow에서 `move-daily` 또는 `move-weekly`를 골라 테스트합니다.
+   수동 실행은 알릴 내용이 없는 날에도 D-day 한 줄을 보냅니다.
+
+로컬 미리보기: `MOVING_PLAN_FILE=moving_plan.json python -m briefing_bot.main move --edition weekly --date 2027-01-31 --no-send`
+(`moving_plan.json`은 `.gitignore`에 등록되어 있습니다.)
+
 ### 동작 순서
 
 1. **뉴스 수집** (`briefing_bot/scraper.py`): `news.nate.com/rank/interest?sc=<분야>&p=day&date=<날짜>`에서
@@ -145,6 +176,7 @@ python -m briefing_bot.main weather --no-send                 # 전송 없이 �
 python -m briefing_bot.main news --edition noon --no-send
 python -m briefing_bot.main news --edition evening --sections pol,eco
 python -m briefing_bot.main news --no-summary --no-send       # API 키 없이 제목만 수집
+python -m briefing_bot.main move --date 2027-02-10 --no-send  # 이사 알림 미리보기 (moving_plan.json 필요)
 python -m briefing_bot.main auto                              # 현재 시각에 맞는 작업 실행 (cron 서버용)
 ```
 
