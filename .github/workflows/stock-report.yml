@@ -1,0 +1,88 @@
+name: Stock Report
+
+# 증시 리포트 (KST). 뉴스·날씨 브리핑과 별도 워크플로로 분리했다:
+#  - 정각에 맞추려고 일찍 깨어나 목표 시각까지 대기하므로(최대 25분), 같은 concurrency 그룹이면
+#    뉴스 브리핑을 막고 대기 중인 실행이 취소된다.
+# cron 은 UTC 이고 GitHub 예약 실행은 몇 분 늦게 시작될 수 있어, 목표 시각보다 약 12분 일찍 건다.
+# 스크립트가 목표 시각(09:03 등)까지 기다린 뒤 시세를 가져오고, 너무 이르거나 늦은 실행은 건너뛴다.
+on:
+  schedule:
+    - cron: "50 23 * * 0-4"  # 09:03 국장 개장 3분 후   (08:50 KST 월~금)
+    - cron: "48 2 * * 1-5"   # 12:00 국장 정오 점검     (11:48 KST 월~금)
+    - cron: "8 6 * * 1-5"    # 15:20 국장 마감 10분 전  (15:08 KST 월~금)
+    - cron: "20 13 * * 1-5"  # 미장 개장 3분 후, 서머타임(EDT) 22:33 KST — 겨울엔 스스로 건너뜀
+    - cron: "20 14 * * 1-5"  # 미장 개장 3분 후, 표준시(EST) 23:33 KST — 여름엔 스스로 건너뜀
+    - cron: "48 21 * * 1-5"  # 07:00 미국 증시 마감 브리핑 (06:48 KST 화~토)
+  workflow_dispatch:
+    inputs:
+      task:
+        description: "실행할 리포트 (수동 실행은 대기·휴장 확인 없이 바로 보냄)"
+        type: choice
+        options: [kr_open, kr_noon, kr_close, us_open, us_close]
+        default: kr_close
+
+permissions:
+  contents: write
+
+concurrency:
+  group: stock-report
+  cancel-in-progress: false
+
+jobs:
+  stock:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Pick task
+        id: pick
+        env:
+          SCHEDULE: ${{ github.event.schedule }}
+          INPUT_TASK: ${{ inputs.task }}
+        run: |
+          case "$SCHEDULE" in
+            "50 23 * * 0-4") task=kr_open ;;
+            "48 2 * * 1-5")  task=kr_noon ;;
+            "8 6 * * 1-5")   task=kr_close ;;
+            "20 13 * * 1-5"|"20 14 * * 1-5") task=us_open ;;
+            "48 21 * * 1-5") task=us_close ;;
+            *)               task="$INPUT_TASK" ;;
+          esac
+          echo "task=$task" >> "$GITHUB_OUTPUT"
+          echo "실행 작업: $task"
+
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: Run stock report
+        env:
+          TASK: ${{ steps.pick.outputs.task }}
+          EVENT: ${{ github.event_name }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          STOCK_WATCHLIST: ${{ vars.STOCK_WATCHLIST }}
+        run: |
+          # 수동 실행은 대기·휴장 확인 없이, 이미 보낸 리포트여도 다시 보낸다
+          FORCE=""
+          if [ "$EVENT" = "workflow_dispatch" ]; then FORCE="--force"; fi
+          python -m briefing_bot.main stock --edition "$TASK" $FORCE
+
+      - name: Commit report archive
+        env:
+          TASK: ${{ steps.pick.outputs.task }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add briefings/
+          if git diff --cached --quiet; then exit 0; fi
+          git commit -m "stock: $(TZ=Asia/Seoul date +%Y-%m-%d) $TASK"
+          for i in 1 2 3; do
+            git pull --rebase && git push && break
+            sleep 5
+          done
