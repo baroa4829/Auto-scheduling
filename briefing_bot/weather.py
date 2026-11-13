@@ -5,6 +5,7 @@ from __future__ import annotations
 import html
 import logging
 import os
+import time
 from dataclasses import dataclass
 from datetime import date
 
@@ -90,9 +91,32 @@ PM10_BOUNDS = (30, 80, 150)
 PM25_BOUNDS = (15, 35, 75)
 
 
+# Open-Meteo 가 가끔 잠깐 응답하지 않으므로 몇 번 다시 시도한다
+RETRIES = 3          # 총 시도 횟수
+TIMEOUT = 20         # 요청당 초
+RETRY_WAIT = 5       # 첫 재시도 대기(초), 이후 두 배씩
+
+
+def _get(url: str, params: dict, attempts: int = RETRIES) -> requests.Response:
+    """GET 요청. 연결 오류·타임아웃·429/5xx 는 잠시 쉬었다가 다시 시도한다."""
+    for i in range(1, attempts + 1):
+        try:
+            resp = requests.get(url, params=params, timeout=TIMEOUT)
+            if resp.status_code == 429 or resp.status_code >= 500:
+                resp.raise_for_status()
+            return resp
+        except (requests.ConnectionError, requests.Timeout, requests.HTTPError) as exc:
+            if i == attempts:
+                raise
+            wait = RETRY_WAIT * 2 ** (i - 1)
+            log.warning("요청 실패 (%d/%d), %d초 후 재시도: %s", i, attempts, wait, exc)
+            time.sleep(wait)
+    raise AssertionError("unreachable")
+
+
 def fetch(loc: Location) -> dict:
     common = {"latitude": loc.lat, "longitude": loc.lon, "timezone": "Asia/Seoul"}
-    fc = requests.get(
+    fc = _get(
         FORECAST_URL,
         params={
             **common,
@@ -103,14 +127,12 @@ def fetch(loc: Location) -> dict:
             "wind_speed_unit": "ms",
             "forecast_days": 2,  # 저녁 브리핑에서 내일 예보도 사용
         },
-        timeout=15,
     )
     fc.raise_for_status()
     data = {"forecast": fc.json(), "air": None}
     try:
-        air = requests.get(
-            AIR_URL, params={**common, "current": "pm10,pm2_5"}, timeout=15
-        )
+        # 미세먼지는 없어도 브리핑은 나가므로 재시도는 짧게
+        air = _get(AIR_URL, {**common, "current": "pm10,pm2_5"}, attempts=2)
         air.raise_for_status()
         data["air"] = air.json()
     except requests.RequestException as exc:

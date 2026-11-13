@@ -407,3 +407,35 @@ def test_fmt_change_arrows():
     assert stocks.fmt_change(up) == "🔺1.00%"
     assert stocks.fmt_change(down) == "🔽1.00%"
     assert stocks.fmt_change(flat) == "➖0.00%"
+
+
+def test_weather_fetch_retries_on_timeout(monkeypatch):
+    calls = []
+
+    class R:
+        status_code = 200
+        def raise_for_status(self): pass
+        def json(self): return FAKE_WEATHER
+
+    def fake_get(url, **kw):
+        calls.append(url)
+        if len(calls) == 1:
+            raise requests.Timeout("read timed out")
+        return R()
+
+    monkeypatch.setattr(weather.requests, "get", fake_get)
+    monkeypatch.setattr(weather.time, "sleep", lambda s: None)
+    data = weather.fetch(weather.Location("동탄", 37.1, 127.1))
+    assert data["forecast"] == FAKE_WEATHER
+    assert calls[0] == calls[1] == weather.FORECAST_URL
+
+
+def test_weather_fetch_gives_up_after_retries(monkeypatch):
+    def fake_get(url, **kw):
+        raise requests.Timeout("read timed out")
+
+    monkeypatch.setattr(weather.requests, "get", fake_get)
+    monkeypatch.setattr(weather.time, "sleep", lambda s: None)
+    import pytest
+    with pytest.raises(requests.Timeout):
+        weather.fetch(weather.Location("동탄", 37.1, 127.1))
