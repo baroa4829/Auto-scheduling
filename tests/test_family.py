@@ -139,3 +139,20 @@ def test_run_family_never_writes_files(tmp_path, monkeypatch, capsys):
     assert rc == 0
     assert "이사까지 1일" in capsys.readouterr().out
     assert list(tmp_path.iterdir()) == []
+
+
+def test_construction_schedule_titles_get_matching_checks():
+    names = lambda t: [n for n, _ in family.phase_checks(t)]
+    assert names("[공사] 탄성코트") == ["탄성코트"]
+    assert names("[공사] 화장실 기구셋팅") == ["욕실 기구"]
+    assert names("[공사] 중문·도어 설치") == ["중문·도어"]
+    assert names("[공사] 실리콘") == ["실리콘"]
+    assert names("[공사] 전등") == ["전기"]
+    assert names("[공사] 설비·방수 (화장실 재물방수, 세탁실 확장)") == ["설비·배관", "방수"]
+
+
+def test_construction_events_skip_lookahead_but_show_day_before():
+    ev = family.CalEvent("[공사] 도배", date(2027, 1, 24), date(2027, 1, 26))
+    assert family.build_plan(date(2027, 1, 17), [ev], None).upcoming == []
+    text = family.render_daily(family.build_plan(date(2027, 1, 23), [ev], None))
+    assert "도배 체크" in text and "~1/26(화)" in text
