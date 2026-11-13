@@ -440,3 +440,25 @@ def test_fmt_change_arrows():
     assert stocks.fmt_change(up) == "🔺1.00%"
     assert stocks.fmt_change(down) == "🔽1.00%"
     assert stocks.fmt_change(flat) == "➖0.00%"
+
+
+def test_weather_fetch_retries(monkeypatch):
+    calls = []
+
+    class R:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"ok": True}
+
+    def fake_get(url, params=None, timeout=None):
+        calls.append(url)
+        if len(calls) < 3:
+            raise requests.ReadTimeout("timeout")
+        return R()
+
+    monkeypatch.setattr(weather.requests, "get", fake_get)
+    monkeypatch.setattr(weather.time, "sleep", lambda *_: None)
+    assert weather._get_json("u", {}) == {"ok": True}
+    assert len(calls) == 3
