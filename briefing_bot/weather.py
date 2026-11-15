@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import html
 import logging
+import time
 import os
 from dataclasses import dataclass
 from datetime import date
@@ -90,9 +91,24 @@ PM10_BOUNDS = (30, 80, 150)
 PM25_BOUNDS = (15, 35, 75)
 
 
+def _get_json(url: str, params: dict, attempts: int = 3) -> dict:
+    """Open-Meteo 가 가끔 응답 없이 멈춰서(2026-11-13 17시) 몇 번 다시 시도한다."""
+    last: Exception | None = None
+    for i in range(attempts):
+        try:
+            resp = requests.get(url, params=params, timeout=20)
+            resp.raise_for_status()
+            return resp.json()
+        except requests.RequestException as exc:
+            last = exc
+            if i < attempts - 1:
+                time.sleep(5 * (i + 1))
+    raise last  # type: ignore[misc]
+
+
 def fetch(loc: Location) -> dict:
     common = {"latitude": loc.lat, "longitude": loc.lon, "timezone": "Asia/Seoul"}
-    fc = requests.get(
+    forecast = _get_json(
         FORECAST_URL,
         params={
             **common,
@@ -103,16 +119,10 @@ def fetch(loc: Location) -> dict:
             "wind_speed_unit": "ms",
             "forecast_days": 2,  # 저녁 브리핑에서 내일 예보도 사용
         },
-        timeout=15,
     )
-    fc.raise_for_status()
-    data = {"forecast": fc.json(), "air": None}
+    data = {"forecast": forecast, "air": None}
     try:
-        air = requests.get(
-            AIR_URL, params={**common, "current": "pm10,pm2_5"}, timeout=15
-        )
-        air.raise_for_status()
-        data["air"] = air.json()
+        data["air"] = _get_json(AIR_URL, {**common, "current": "pm10,pm2_5"}, attempts=2)
     except requests.RequestException as exc:
         log.warning("미세먼지 정보 조회 실패 (%s): %s", loc.name, exc)
     return data

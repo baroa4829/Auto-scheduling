@@ -4,7 +4,7 @@
     07:30 weather --edition morning  오늘의 날씨
     08시  news --edition morning     1차 뉴스 브리핑
     12시  news --edition noon        2차 뉴스 브리핑
-    16시  news --edition afternoon   3차 뉴스 브리핑
+    (16시 3차 뉴스 news --edition afternoon 은 예약에서 빠짐. 수동 실행만 가능)
     17시  weather --edition evening  저녁 날씨 & 내일 예보
     22시  news --edition evening     하루 마무리 뉴스 브리핑
 
@@ -25,7 +25,6 @@ from __future__ import annotations
 import argparse
 import logging
 import os
-import re
 import sys
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -33,7 +32,7 @@ from pathlib import Path
 
 import requests
 
-from . import notifier, scraper, stocks, summarizer, weather
+from . import dedupe, notifier, scraper, stocks, summarizer, weather
 
 KST = timezone(timedelta(hours=9))
 
@@ -41,7 +40,7 @@ KST = timezone(timedelta(hours=9))
 @dataclass(frozen=True)
 class Edition:
     key: str
-    order: int  # 같은 날 브리핑 순서 (🆕 비교용)
+    order: int  # 같은 날 브리핑 순서 (앞선 브리핑과 중복 제거용)
     hour: int  # 예정 시각 (KST)
     title: str
     tone: str = ""
@@ -61,7 +60,6 @@ EDITIONS: dict[str, Edition] = {
     ]
 }
 
-URL_RE = re.compile(r"\((https://news\.nate\.com/view/[^)\s]+)\)")
 
 
 def now_kst() -> datetime:
@@ -139,20 +137,6 @@ def run_stock(args: argparse.Namespace) -> int:
 
 # ---------------- 뉴스 ----------------
 
-def _previous_urls(day_dir: Path, edition: Edition) -> set[str] | None:
-    """같은 날 앞선 브리핑에 나온 기사 URL. 앞선 브리핑이 없으면 None (🆕 표시 안 함)."""
-    urls: set[str] = set()
-    found = False
-    for e in EDITIONS.values():
-        if e.order >= edition.order:
-            continue
-        f = day_dir / f"{e.order}-{e.key}.md"
-        if f.exists():
-            found = True
-            urls |= set(URL_RE.findall(f.read_text(encoding="utf-8")))
-    return urls if found else None
-
-
 def check_secrets(need_claude: bool, need_telegram: bool) -> bool:
     missing = []
     if need_claude and not os.environ.get("ANTHROPIC_API_KEY"):
@@ -187,7 +171,9 @@ def run_news(args: argparse.Namespace) -> int:
 
     # 1) 랭킹(제목)만 먼저 모은다. 본문은 분야 선택이 끝난 뒤 한 번만 가져온다.
     session = requests.Session()
-    collected = scraper.collect_rankings(session, sections, day, args.top)
+    # 앞선 브리핑과 겹치는 기사를 빼고도 분야별 top 개를 채울 수 있도록 넉넉히 가져온다
+    fetch_n = args.top * 2
+    collected = scraper.collect_rankings(session, sections, day, fetch_n)
 
     # 이른 아침에는 오늘 랭킹이 아직 쌓이지 않았을 수 있어 어제 랭킹으로 보충
     notes: list[str] = []
@@ -195,36 +181,41 @@ def run_news(args: argparse.Namespace) -> int:
         thin = {c: n for c, n in sections.items() if len(collected.get(n, [])) < args.top}
         if thin:
             prev = day - timedelta(days=1)
-            refill = scraper.collect_rankings(session, thin, prev, args.top)
+            refill = scraper.collect_rankings(session, thin, prev, fetch_n)
             for name, arts in refill.items():
                 if len(arts) > len(collected.get(name, [])):
                     collected[name] = arts
                     notes.append(f"{name}: 오늘 랭킹이 아직 부족해 어제({prev:%m/%d}) 랭킹을 사용했습니다")
 
-    # 2) 본문 수집 (실패해도 제목만으로 요약 진행)
-    scraper.fetch_bodies(session, collected)
-    session.close()
-
     if not any(collected.values()):
         logging.error("수집된 기사가 없습니다. 네이트 페이지 구조가 바뀌었는지 확인하세요.")
         return 1
 
+    # 2) 같은 날 앞선 브리핑에 나온 기사, 분야끼리 겹치는 기사, 제목이 거의 같은 기사는 뺀다
+    day_dir = Path(args.out_dir) / f"{day:%Y-%m-%d}"
+    earlier = [f"{e.order}-{e.key}.md" for e in EDITIONS.values() if e.order < edition.order]
+    full_ranking = {n: arts[: args.top] for n, arts in collected.items()}
+    collected, dropped = dedupe.filter_new(
+        collected, dedupe.previous_articles(day_dir, earlier), args.top
+    )
+    if dropped:
+        logging.info("겹치는 기사 %d건 제외", dropped)
+    no_new = [n for n, arts in collected.items() if not arts]
+    if no_new:
+        notes.append(f"새로 오른 기사 없음: {', '.join(no_new)}")
+
+    # 3) 본문 수집 (실패해도 제목만으로 요약 진행)
+    scraper.fetch_bodies(session, collected)
+    session.close()
+
     summaries = {} if args.no_summary else summarizer.summarize_all(collected, edition.tone)
     overview = (
-        summarizer.summarize_overview(collected, summaries)
+        summarizer.summarize_overview(full_ranking, summaries)
         if edition.key == "evening" and not args.no_summary
         else None
     )
 
-    day_dir = Path(args.out_dir) / f"{day:%Y-%m-%d}"
-    prev_urls = _previous_urls(day_dir, edition)
-    new_urls = (
-        {a.url for arts in collected.values() for a in arts} - prev_urls
-        if prev_urls is not None
-        else set()
-    )
-
-    render_args = (edition.title, day, collected, summaries, new_urls, overview, notes)
+    render_args = (edition.title, day, collected, summaries, set(), overview, notes)
     markdown = notifier.render_news_markdown(*render_args)
     telegram = notifier.render_news_telegram(*render_args)
 
