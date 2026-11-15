@@ -12,7 +12,6 @@
 | 07:30 | 🌤️ 오늘의 날씨 (기온, 시간대별 날씨, 강수확률, 미세먼지, 우산·옷차림 팁) | `weather --edition morning` |
 | 08시 | 🌅 1차 뉴스 브리핑 | `news --edition morning` |
 | 12시 | ☀️ 2차 뉴스 브리핑 | `news --edition noon` |
-| 16시 | 🌇 3차 뉴스 브리핑 | `news --edition afternoon` |
 | 17시 | 🌆 저녁 날씨 & 내일 예보 (저녁·밤 날씨, 내일 기온·강수확률, 퇴근길 우산 팁) | `weather --edition evening` |
 | 22시 | 🌙 하루 마무리 뉴스 브리핑 + "오늘 하루 한눈에" | `news --edition evening` |
 

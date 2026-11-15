@@ -4,7 +4,7 @@
     07:30 weather --edition morning  오늘의 날씨
     08시  news --edition morning     1차 뉴스 브리핑
     12시  news --edition noon        2차 뉴스 브리핑
-    16시  news --edition afternoon   3차 뉴스 브리핑
+    (16시 3차 뉴스 news --edition afternoon 은 예약에서 빠짐. 수동 실행만 가능)
     17시  weather --edition evening  저녁 날씨 & 내일 예보
     22시  news --edition evening     하루 마무리 뉴스 브리핑
 
