@@ -1,0 +1,9 @@
+{
+  "name": "동석교회 소년부",
+  "short_name": "소년부",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f6f4ef",
+  "theme_color": "#2f6b4f",
+  "icons": [{ "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }]
+}
