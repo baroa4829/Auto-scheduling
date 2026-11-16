@@ -1,7 +1,7 @@
 """데일리 브리핑 봇 진입점.
 
 하루 일정 (KST):
-    07:30 weather --edition morning  오늘의 날씨
+    07시  weather --edition morning  오늘의 날씨
     08시  news --edition morning     1차 뉴스 브리핑
     12시  news --edition noon        2차 뉴스 브리핑
     (16시 3차 뉴스 news --edition afternoon 은 예약에서 빠짐. 수동 실행만 가능)
@@ -226,7 +226,7 @@ def run_news(args: argparse.Namespace) -> int:
 
 # ---------------- 자동 선택 ----------------
 
-WEATHER_TIMES = {"morning": (7, 30), "evening": (17, 0)}
+WEATHER_TIMES = {"morning": (7, 0), "evening": (17, 0)}
 STOCK_TIMES = {"morning": (8, 30), "close": (16, 10)}
 
 
@@ -251,7 +251,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     common.add_argument("--force", action="store_true", help="이미 보낸 브리핑이어도 다시 보냄")
     common.add_argument("--out-dir", default=os.environ.get("BRIEFING_OUT_DIR", "briefings"))
 
-    wx = sub.add_parser("weather", parents=[common], help="날씨 (morning: 07:30 오늘 날씨, evening: 17시 저녁·내일 날씨)")
+    wx = sub.add_parser("weather", parents=[common], help="날씨 (morning: 07시 오늘 날씨, evening: 17시 저녁·내일 날씨)")
     wx.add_argument("--edition", choices=list(WEATHER_TIMES), default="morning")
 
     news = sub.add_parser("news", parents=[common], help="뉴스 브리핑")

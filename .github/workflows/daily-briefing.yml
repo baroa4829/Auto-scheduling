@@ -5,7 +5,7 @@ name: Daily Briefing
 # 늦게 온 예약 실행과 수동 실행이 겹쳐도 같은 브리핑은 한 번만 보낸다 (briefings/ 기록 확인).
 on:
   schedule:
-    - cron: "15 22 * * *"   # 07:30 오늘의 날씨       (07:15 KST)
+    - cron: "20 21 * * *"   # 07시 오늘의 날씨        (06:20 KST, 예약 실행이 30~40분 늦게 오는 것 감안)
     - cron: "50 22 * * *"   # 08시 1차 뉴스 브리핑     (07:50 KST)
     - cron: "50 2 * * *"    # 12시 2차 뉴스 브리핑     (11:50 KST)
     - cron: "45 7 * * *"    # 17시 저녁 날씨·내일 예보 (16:45 KST)
@@ -42,7 +42,7 @@ jobs:
           INPUT_TASK: ${{ inputs.task }}
         run: |
           case "$SCHEDULE" in
-            "15 22 * * *") task=weather-morning ;;
+            "20 21 * * *") task=weather-morning ;;
             "45 7 * * *")  task=weather-evening ;;
             "50 22 * * *") task=morning ;;
             "50 2 * * *")  task=noon ;;
