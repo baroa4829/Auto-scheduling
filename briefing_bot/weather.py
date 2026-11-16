@@ -1,4 +1,4 @@
-"""Open-Meteo(무료, API 키 불필요)로 오늘 날씨 + 미세먼지 브리핑을 만든다."""
+"""오늘 날씨 + 미세먼지 브리핑. 예보는 기상청 단기예보(1순위) → Open-Meteo → MET Norway, 미세먼지는 Open-Meteo."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from datetime import date
 
 import requests
 
-from . import metno
+from . import kma, metno
 
 log = logging.getLogger(__name__)
 
@@ -22,7 +22,7 @@ AIR_URL = "https://air-quality-api.open-meteo.com/v1/air-quality"
 WMO: dict[int, tuple[str, str]] = {
     0: ("☀️", "맑음"),
     1: ("🌤️", "대체로 맑음"),
-    2: ("⛅", "구름 조금"),
+    2: ("⛅", "구름 많음"),
     3: ("☁️", "흐림"),
     45: ("🌫️", "안개"),
     48: ("🌫️", "짙은 안개"),
@@ -36,6 +36,7 @@ WMO: dict[int, tuple[str, str]] = {
     65: ("🌧️", "강한 비"),
     66: ("🌧️", "어는 비"),
     67: ("🌧️", "어는 비"),
+    68: ("🌨️", "비 또는 눈"),  # 기상청 강수형태 '비/눈' (WMO 표준 코드 아님)
     71: ("🌨️", "약한 눈"),
     73: ("🌨️", "눈"),
     75: ("❄️", "많은 눈"),
@@ -111,10 +112,9 @@ def _get_json(url: str, params: dict, attempts: int = 3) -> dict:
     raise last  # type: ignore[misc]
 
 
-def fetch(loc: Location) -> dict:
-    common = {"latitude": loc.lat, "longitude": loc.lon, "timezone": "Asia/Seoul"}
+def _fetch_open_meteo_or_metno(loc: Location, common: dict) -> dict:
     try:
-        forecast = _get_json(
+        return _get_json(
             FORECAST_URL,
             params={
                 **common,
@@ -130,7 +130,21 @@ def fetch(loc: Location) -> dict:
     except requests.RequestException as exc:
         # GitHub 서버에서는 Open-Meteo 가 아침마다 429 로 거절해서 노르웨이 기상청으로 대신 받는다
         log.warning("Open-Meteo 실패 (%s), MET Norway 로 대신 조회: %s", loc.name, exc)
-        forecast = metno.fetch_forecast(loc.lat, loc.lon)
+        return metno.fetch_forecast(loc.lat, loc.lon)
+
+
+def fetch(loc: Location) -> dict:
+    """예보 소스 우선순위: 기상청(KMA_API_KEY 있을 때) → Open-Meteo → MET Norway."""
+    common = {"latitude": loc.lat, "longitude": loc.lon, "timezone": "Asia/Seoul"}
+    forecast = None
+    if kma.api_key():
+        try:
+            forecast = kma.fetch_forecast(loc.lat, loc.lon)
+            log.info("기상청 단기예보 사용 (%s)", loc.name)
+        except (requests.RequestException, RuntimeError, ValueError, KeyError, TypeError) as exc:
+            log.warning("기상청 조회 실패 (%s), 다른 소스로 대신 조회: %s", loc.name, exc)
+    if forecast is None:
+        forecast = _fetch_open_meteo_or_metno(loc, common)
     data = {"forecast": forecast, "air": None}
     try:
         data["air"] = _get_json(AIR_URL, {**common, "current": "pm10,pm2_5"}, attempts=2)

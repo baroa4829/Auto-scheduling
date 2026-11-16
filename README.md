@@ -52,7 +52,7 @@
    분야별 상위 10개 기사와 본문(최대 2,500자)을 가져옵니다.
 2. **요약** (`briefing_bot/summarizer.py`): 분야마다 Claude API를 한 번 호출해 분야 헤드라인 1줄과 기사별 요약을 받습니다.
    22시 브리핑은 분야를 아우르는 하루 정리를 만들기 위해 한 번 더 호출합니다.
-3. **날씨** (`briefing_bot/weather.py`): [Open-Meteo](https://open-meteo.com) 예보와 대기질 API를 씁니다. API 키는 필요 없습니다.
+3. **날씨** (`briefing_bot/weather.py`): 예보는 **기상청 단기예보**(공공데이터포털, Secret `KMA_API_KEY`)를 1순위로 쓰고, 실패하면 [Open-Meteo](https://open-meteo.com), 그다음 노르웨이 기상청(MET Norway) 순서로 대신 받습니다. 미세먼지는 Open-Meteo 대기질 API를 씁니다.
 4. **전송** (`briefing_bot/notifier.py`): 텔레그램으로 보냅니다.
    뉴스 브리핑은 `briefings/YYYY-MM-DD/<순서>-<에디션>.md`로 커밋되어 아카이브로 남습니다.
 
