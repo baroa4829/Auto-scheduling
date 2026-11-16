@@ -70,6 +70,7 @@ def test_kma_converts_and_renders():
     assert "우산" in " ".join(r["tips"]) and r["tomorrow"]["tmin"] == -2
     md = weather.render_markdown(date(2026, 11, 18), [r])
     assert "🌧️ 약한 비" in md and "최저 1°C / 최고 12°C" in md
+    assert "강수확률 80%" in md and ".0%" not in md
 
 
 def test_kma_is_primary_and_falls_back(monkeypatch):

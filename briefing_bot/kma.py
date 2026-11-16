@@ -103,7 +103,7 @@ def to_open_meteo(items: list[dict], now: datetime) -> dict:
         pcp = _pcp_mm(v.get("PCP", ""))
         code = to_wmo(v.get("SKY"), v.get("PTY"), pcp)
         temp = float(v["TMP"])
-        pop = float(v.get("POP", 0))
+        pop = int(float(v.get("POP", 0)))  # 정수 % 로 표시
         iso = f"{d[:4]}-{d[4:6]}-{d[6:]}T{t[:2]}:00"
         hourly["time"].append(iso)
         hourly["temperature_2m"].append(temp)
