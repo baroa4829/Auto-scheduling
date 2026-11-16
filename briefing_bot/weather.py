@@ -11,6 +11,8 @@ from datetime import date
 
 import requests
 
+from . import metno
+
 log = logging.getLogger(__name__)
 
 FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
@@ -101,6 +103,9 @@ def _get_json(url: str, params: dict, attempts: int = 3) -> dict:
             return resp.json()
         except requests.RequestException as exc:
             last = exc
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            if status == 429:  # 요청 한도 초과는 기다려도 안 풀리므로 바로 넘긴다
+                break
             if i < attempts - 1:
                 time.sleep(5 * (i + 1))
     raise last  # type: ignore[misc]
@@ -108,18 +113,24 @@ def _get_json(url: str, params: dict, attempts: int = 3) -> dict:
 
 def fetch(loc: Location) -> dict:
     common = {"latitude": loc.lat, "longitude": loc.lon, "timezone": "Asia/Seoul"}
-    forecast = _get_json(
-        FORECAST_URL,
-        params={
-            **common,
-            "current": "temperature_2m,apparent_temperature,relative_humidity_2m,weather_code,wind_speed_10m",
-            "hourly": "temperature_2m,precipitation_probability,weather_code",
-            "daily": "weather_code,temperature_2m_max,temperature_2m_min,"
-            "precipitation_probability_max,precipitation_sum,uv_index_max",
-            "wind_speed_unit": "ms",
-            "forecast_days": 2,  # 저녁 브리핑에서 내일 예보도 사용
-        },
-    )
+    try:
+        forecast = _get_json(
+            FORECAST_URL,
+            params={
+                **common,
+                "current": "temperature_2m,apparent_temperature,relative_humidity_2m,weather_code,wind_speed_10m",
+                "hourly": "temperature_2m,precipitation_probability,weather_code",
+                "daily": "weather_code,temperature_2m_max,temperature_2m_min,"
+                "precipitation_probability_max,precipitation_sum,uv_index_max",
+                "wind_speed_unit": "ms",
+                "forecast_days": 2,  # 저녁 브리핑에서 내일 예보도 사용
+            },
+            attempts=2,
+        )
+    except requests.RequestException as exc:
+        # GitHub 서버에서는 Open-Meteo 가 아침마다 429 로 거절해서 노르웨이 기상청으로 대신 받는다
+        log.warning("Open-Meteo 실패 (%s), MET Norway 로 대신 조회: %s", loc.name, exc)
+        forecast = metno.fetch_forecast(loc.lat, loc.lon)
     data = {"forecast": forecast, "air": None}
     try:
         data["air"] = _get_json(AIR_URL, {**common, "current": "pm10,pm2_5"}, attempts=2)
