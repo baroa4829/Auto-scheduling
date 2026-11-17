@@ -72,6 +72,7 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           NATE_SECTIONS: ${{ inputs.sections || vars.NATE_SECTIONS }}
           WEATHER_LOCATIONS: ${{ vars.WEATHER_LOCATIONS }}
+          KMA_API_KEY: ${{ secrets.KMA_API_KEY }}
           STOCK_WATCHLIST: ${{ vars.STOCK_WATCHLIST }}
         run: |
           # 수동 실행은 이미 보낸 브리핑이어도 다시 보낸다
